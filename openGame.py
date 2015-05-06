@@ -6,6 +6,7 @@ TODO/reference:
 -Use STUN to determine external IP: http://tools.ietf.org/html/rfc5389 , http://www.stunprotocol.org/
 -Move over to new selectors module: https://docs.python.org/3/library/selectors.html
 '''
+#Next Task: move to selectors module (uses callbacks), finish properly recording connected peers
 
 import socket
 import string
@@ -20,15 +21,22 @@ import urllib.request
 
 #A function to initialize everything
 def Initialize():
-    global peerList, connList, dest, udpPort, tcpPort, s, myIP, notConnected, connecting, connected, verboseMode
-    global incomingConnection, outgoingConnection, updatesPerSecond, mainSocket
+    global peerList, connList, connID, dest, udpPort, tcpPort, s, myIP, notConnected, connecting, connected, \
+    verboseMode, incomingConnection, outgoingConnection, updatesPerSecond, mainSocket, readable, writable, \
+    recvData
+    
     peerList = []
-    connList = []
+    connList = [[], []]
+
+    #This is a persistent identifier that we need to track
+    connID = b""
 
     #Some variables to make life easier
     notConnected = 0
     connecting = 1
     connected = 2
+    readable = 0
+    writable = 1
 
     verboseMode = False
     incomingConnection = True
@@ -51,7 +59,7 @@ def Initialize():
     s.bind(("", udpPort))
 
     #Create TCP server socket
-    #Used to facilite connection with peers
+    #Used to facilitate connection with peers
     tcpPort = 5001
     mainSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     mainSocket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -59,8 +67,8 @@ def Initialize():
     
     mainSocket.listen(5)
 
-    #Append the main socket to the connection list
-    connList.append(mainSocket)
+    #Append the main socket to the readable subset of the connection list
+    connList[readable].append(mainSocket)
 
     #Determine our public IP address so we recognize ourselves in an IP list
     #TODO: Eventually needs to use STUN servers
@@ -68,17 +76,51 @@ def Initialize():
         #myIP = urllib.request.urlopen("http://ipecho.net/plain").read().decode("utf-8")
         myIP = "174.109.48.176"
     except:
-        #myIP = input("The online IP service failed to respond, please manually enter your ip.\n")
-        myIP = "174.109.48.176"
-    print(myIP)
+        myIP = input("The online IP service failed to respond, please manually enter your ip.\n")
+    alert(myIP)
 
 
 #This function will output to the console depending on set verbosity level
 def alert(verbose, nonverbose =""):
-    if verboseMode:
+    if verboseMode or nonverbose == "_all":
         print(verbose)
     elif nonverbose:
         print(nonverbose)
+
+#This function completely handles making connection to a tracker
+def trackerConnect(destAddress):
+    global connID   #This fixes a strange bug that creeped in somewhere. TODO: Investigate further.
+    transID = random.randrange(65535).to_bytes(4, 'big')
+    data = 0x41727101980.to_bytes(8, 'big') + 0x0.to_bytes(4, 'big') + transID
+
+    alert(data, "Connecting to tracker " + str(destAddress[0]) + " on port " + str(destAddress[1]) + ".")
+    s.sendto(data, destAddress)
+
+    #Decode response
+    #------------------------
+    #TODO: make this select based, and give user option to wait or move on if response is slow
+    recvData, addr = s.recvfrom(1024)
+
+    #Perform integrity checks and
+    #Return True if response checks out
+    if len(recvData) > 15:
+        if transID == recvData[4:8]:
+            if 0x0.to_bytes(4, 'big') == recvData[:4]:
+                #The response is valid
+                alert("Response: " + str(recvData), "Connection to tracker completed.")   
+                connID = recvData[8:16]
+                alert("Connection ID: " + str(connID))
+                return True
+            else:
+                alert("Received action is incorrect in the tracker's response.", "_all")
+        else:
+            alert("Received Transaction ID is incorrect in the tracker's response.", "_all")
+            alert("Wanted: " + transID + " Received: " + recvData[4:8], "_all")
+    else:
+        alert("Response too short", "_all")
+
+    #If we didn't return earlier, the response is bad
+    return False
 
 
 #A function to announce to trackers
@@ -100,10 +142,9 @@ def Announce():
 
     #Diagnostics
     alert(payload)
-
-    s.sendto(payload, dest)
     
-    alert("Announced to tracker.", "Announced to tracker.")
+    s.sendto(payload, dest)
+    alert("Announced to tracker.", "_all")
 
 
 #A function to index returned addresses into the peerlist
@@ -116,29 +157,29 @@ def indexAddresses(rawAddr):
         p = int.from_bytes(recvData[24:26], 'big')
         peerList.append([a, p, notConnected, [0]])
 
-    print(peerList)
+    #Diagnostics
+    alert(peerList)
 
 
-#A function to set the status of a peer in the list.
+#A function to set the status of a peer in the list.1
 #Will add an address into the peerlist if it doesn't already exist.
 def setPeerStatus(addr, status):
-    e = True
+    addPeer = True
 
     #Brief search to see if the peer is currently in our list
     for i, (a, b, c, d) in enumerate(peerList):
         if (a, b) == addr:
-            alert("Peer " + str(addr) + " already exists in the peer list.")
+            alert("Peer " + str(addr) + " already exists in the peer list.", "_all")
 
             #Record the peer's position and toggle flag so peer is not added
             pos = i
-            e = False
-
+            addPeer = False
 
     
-    if e:
+    if addPeer:
         #Add peer into the peerlist
-        peerList.append([addr[0], addr[1], status, []])
-        alert('Added to peerlist.', 'Added to peerlist.')
+        peerList.append([addr[0], addr[1], status, [0]])
+        alert('Added to peerlist.', "_all")
     else:
         #Edit the peer's status
         #Somehow this feels like a hack - double check to make sure this doesn't break stuff
@@ -146,15 +187,15 @@ def setPeerStatus(addr, status):
         if status == notConnected:
             a = 30 #Setting a new timeout
         else:
-            a = peerList[pos][3]
+            a = peerList[pos][3]    #Preserves the existing storage
         
-        peerList[pos] = [peerList[pos][:2], status, a]
+        peerList[pos] = [peerList[pos][0], peerList[pos][1], status, a]
     if status == notConnected:
-        alert("Peer at " + str(addr) + " set to not connected.", "Peer at " + str(addr) + " set to not connected.")
+        alert("Peer at " + str(addr) + " set to not connected.", "_all")
     elif status == connecting:
-        alert("Peer at " + str(addr) + " set to connecting.", "Peer at " + str(addr) + " set to connecting.")
+        alert("Peer at " + str(addr) + " set to connecting.", "_all")
     else:
-        alert("Peer at " + str(addr) + " set to connected.", "Peer at " + str(addr) + " set to connected.")
+        alert("Peer at " + str(addr) + " set to connected.", "_all")
             
 
 
@@ -163,11 +204,11 @@ def peerConnection(incom, address = ""):
     if incom:
         #Handle the new incoming connection
         peerSock, peerAddr = mainSocket.accept()
-        print('Accepted a connection from ' + str(peerAddr))
+        alert('Accepted a connection from ' + str(peerAddr), "_all")
         setPeerStatus(peerAddr, connected)
 
         #Add to the connection list
-        connList.append(peerSock)
+        connList[readable].append(peerSock)
 
         #Debug data
         alert("New connection list: " + str(connList))
@@ -175,15 +216,16 @@ def peerConnection(incom, address = ""):
         #Create a new outgoing connection
         #Until STUN servers can be implemented
         peerSock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        #peerSock.setblocking(False)
-        print('Attempting a connection to ' + str(address))
-        peerSock.settimeout(5)
+        peerSock.setblocking(False)
+        alert('Attempting a connection to ' + str(address), "_all")
+        #The connect will give an error since it cannot instantly complete
+        #Add it to the writables list to tell when the connect finishes
         try:
             peerSock.connect(address)
-            setPeerStatus(address, connecting)
         except:
-            print('connection failed, waiting 30s to reconnect')
-            setPeerStatus(address, notConnected)
+            pass
+        connList[writable].append(peerSock)
+        setPeerStatus(address, connecting)
         
 
 #The main manager loop
@@ -195,10 +237,11 @@ def runManager():
     print('Connection manager is now running. \nPress enter to close this program at any time')
     #TODO: Make the above actually work
 
-    #Manage peer list
     while goOn:
         deltaTime = 1/updatesPerSecond
 
+        #Manage peer list
+        #---------------------------------
         #Here, we will loop over all peers, updating and connecting, etc
         #We loop over a shallow copy, because (insert valid reason)
         for i, (a, b, connStatus, connStorage) in enumerate(peerList[:]):
@@ -209,8 +252,6 @@ def runManager():
 
             #None of anything applies to our own ip, so skip
             if a != myIP:
-                #print(a)
-                #print(myIP)
                 if connStatus == notConnected:
                     t = connStorage[0] #The first stored variable is the timeout
                     
@@ -222,16 +263,12 @@ def runManager():
                         #Decrease the reconnect timer
                         peerList[i] = [a, b, connStatus, [t-deltaTime]]
 
-                
-            
-
-
-                    
-        #Watch all sockets
+        #Manage all sockets
+        #---------------------------------
         #TODO: Rewrite using the new selectors module
-        rSock, w, e = select.select(connList,[],[], 0)
+        rSock, wSock, e = select.select(connList[0],connList[1],[], 0)
         for s in rSock:
-            print('sockets to read')
+            alert('New socket(s) available to read.')
             #Handle new incoming connections
             if s == mainSocket:
                 peerConnection(incomingConnection)
@@ -239,7 +276,15 @@ def runManager():
             #Handle incoming data
             else:
                 print('Some other socket!')
-                TODO = True
+
+                #TEMPORARY
+                #Read from the socket and dump to console
+                recvData, addr = s.recvfrom(1024)
+                print(recvData)
+
+        for s in wSock:
+            alert('New connections completed.')
+            #Set peers to connected state, etc
 
         #This loop sleeps so that we will run the loop approx
         #uPS times per second
@@ -247,49 +292,23 @@ def runManager():
     
 
 
-
+#--Main program sequence--
+#-------------------------
 Initialize()
 alert("Initialized. Verbose mode enabled.", "Initialized. Verbose mode disabled.")
 
 
-#Create connection request
-transID = random.randrange(65535).to_bytes(4, 'big')
-data = 0x41727101980.to_bytes(8, 'big')+0x0.to_bytes(4, 'big')+transID
+#Connect to our tracker of choice, and announce if it succeeds
+if trackerConnect(dest):
+    #Store connection ID and announce
+    Announce()
 
-alert(data, "Connecting to tracker" + str(dest[0]) + " on port " + str(dest[1]) + ".")
 
-#Send data
-s.sendto(data, dest)
-
-#Decode response
-#------------------------
-recvData, addr = s.recvfrom(1024)
-
-#Perform integrity checks and
-#Announce if response checks out
-if len(recvData) > 15:
-    if transID == recvData[4:8]:
-        if 0x0.to_bytes(4, 'big') == recvData[:4]:
-            #Store connection ID and announce
-            alert(recvData, "Response recieved. Announcing...")   
-            connID = recvData[8:16]
-            alert(connID)
-            Announce()
-        else:
-            print("Received action is incorrect")
-
-    else:
-        print("Received TransID is incorrect")
-        print(transID)
-        print(recvData[4:8])
-
-else:
-    print("Response too short")
 
 #Decode announce response
 #------------------------
 recvData, addr = s.recvfrom(1024)
-alert(recvData)
+alert("Announce response: " + str(recvData))
 if len(recvData) > 19:
     #TODO: check action, etc, blahblah
     alert("Reannounce interval: " + str(int.from_bytes(recvData[8:12], 'big')) + " seconds")
