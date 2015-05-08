@@ -7,6 +7,7 @@ TODO/reference:
 -Move over to new selectors module: https://docs.python.org/3/library/selectors.html
 '''
 #Next Task: move to selectors module (uses callbacks), finish properly recording connected peers
+#Keep alive
 
 import socket
 import string
@@ -14,6 +15,9 @@ import random
 import select
 import time
 import urllib.request
+import struct
+import time
+import math
 #import tkinter as tk Not needed until GUI
 
 #Functions:
@@ -21,12 +25,17 @@ import urllib.request
 
 #A function to initialize everything
 def Initialize():
-    global peerList, connList, connID, dest, udpPort, tcpPort, s, myIP, notConnected, connecting, connected, \
+    global peerList, connList, connID, dest, udpPort, tcpPort, s, notConnected, connecting, connected, \
     verboseMode, incomingConnection, outgoingConnection, updatesPerSecond, mainSocket, readable, writable, \
-    recvData
+    recvData, settings, settingsFormatString, myIP, myIPtimestamp
     
     peerList = []
     connList = [[], []]
+    settings = [0, 0]       #[publicIP, timestamp]
+
+    #Some settings
+    verboseMode = False
+    settingsFormatString = "4sI"
 
     #This is a persistent identifier that we need to track
     connID = b""
@@ -35,12 +44,16 @@ def Initialize():
     notConnected = 0
     connecting = 1
     connected = 2
+    
     readable = 0
     writable = 1
-
-    verboseMode = False
+    
     incomingConnection = True
     outgoingConnection = False
+    
+    staleIPtimeout = 21600      #6 hours
+    myIP = 0
+    myIPtimestamp = 1
 
     #Set the updates per second value
     updatesPerSecond = 5
@@ -70,14 +83,40 @@ def Initialize():
     #Append the main socket to the readable subset of the connection list
     connList[readable].append(mainSocket)
 
+
+    #Load the settings file, if it exists
+    #------------------------
+    try:
+        #Nothing will happen, and we will just write to the new file on exit
+        open('openGame settings', 'x')
+        print('Created new settings file.')     #Will never be printed if the file exists
+    except FileExistsError:
+        try:
+            #Load the settings file
+            print('Opened settings file')
+            sttngFile = open('openGame settings', 'rb').read()
+            #Format code: The IP address, and an unsigned int timestamp of when the IP was recorded
+            a , b = struct.unpack(settingsFormatString, sttngFile)
+
+            #Update the IP address if the stored one is valid and current
+            if int.from_bytes(a, 'big') > 0 and time.time() - b < staleIPtimeout:
+                alert("Public IP restored from saved values.", "_all")
+                settings[myIP] = socket.inet_ntoa(a)
+        except:
+            pass    #The unpacking failed for some reason, or the file was otherwise invalid. Oh well.
+        
+
     #Determine our public IP address so we recognize ourselves in an IP list
     #TODO: Eventually needs to use STUN servers
-    try:
-        #myIP = urllib.request.urlopen("http://ipecho.net/plain").read().decode("utf-8")
-        myIP = "174.109.48.176"
-    except:
-        myIP = input("The online IP service failed to respond, please manually enter your ip.\n")
-    alert(myIP)
+    if settings[myIP] == 0:
+        alert("Either saved IP was stale, invalid, or the settings file was just created. Retrieving public IP...")
+        try:
+            settings[myIP] = urllib.request.urlopen("http://ipecho.net/plain").read().decode("utf-8")
+            settings[myIPtimestamp] = math.floor(time.time())
+        except:
+            settings[myIP] = input("The online IP service failed to respond, please manually enter your public IP.\n")
+            settings[myIPtimestamp] = math.floor(time.time())
+        alert(settings[myIP])
 
 
 #This function will output to the console depending on set verbosity level
@@ -86,6 +125,21 @@ def alert(verbose, nonverbose =""):
         print(verbose)
     elif nonverbose:
         print(nonverbose)
+
+
+#This function properly shuts down the program
+def shutdown():
+    #Write all settings to file
+    #---------------------------
+    with open('openGame settings', 'wb') as sttngFile:
+        sttngFile.write(struct.pack(settingsFormatString, socket.inet_aton(settings[myIP]), settings[myIPtimestamp]))
+
+    #Close all open sockets (skipping the server socket)
+    #---------------------------------------------------
+    for sock in connList[readable][1:] + connList[writable]:
+        sock.shutdown(socket.SHUT_RDWR)
+        sock.close()
+
 
 #This function completely handles making connection to a tracker
 def trackerConnect(destAddress):
@@ -128,7 +182,7 @@ def Announce():
     #Prepare payload
     a = 0x1.to_bytes(4, 'big') #action
     transID = random.randrange(65535).to_bytes(4, 'big') #TransID
-    iH = 'opnGameGroundContro4'.encode('ascii')
+    iH = 'opnGameGroundContro1'.encode('ascii')
     myID = ('openGame'+''.join(random.choice(string.ascii_letters + string.digits) for _ in range(12))).encode('ascii')
     d = 0x0.to_bytes(8, 'big')
     l = 0x987.to_bytes(8, 'big')
@@ -196,10 +250,8 @@ def setPeerStatus(addr, status):
         alert("Peer at " + str(addr) + " set to connecting.", "_all")
     else:
         alert("Peer at " + str(addr) + " set to connected.", "_all")
-            
 
-
-#A Potentially pointless function to connect to peers
+#A potentially pointless function to connect to peers
 def peerConnection(incom, address = ""):
     if incom:
         #Handle the new incoming connection
@@ -234,7 +286,7 @@ def runManager():
     goOn = True
 
     #Inform the user on program exit
-    print('Connection manager is now running. \nPress enter to close this program at any time')
+    print('Connection manager is now running. \nPress CTRL + C to close this program at any time')
     #TODO: Make the above actually work
 
     while goOn:
@@ -251,7 +303,7 @@ def runManager():
             #1 : Total time disconnected
 
             #None of anything applies to our own ip, so skip
-            if a != myIP:
+            if a != settings[myIP]:
                 if connStatus == notConnected:
                     t = connStorage[0] #The first stored variable is the timeout
                     
@@ -319,19 +371,11 @@ else:
 
 #Enter the main management loop
 #------------------------------
-runManager()
-
-
-
-
-
-
-
-
-
-
-
-
+try:
+    runManager()
+except KeyboardInterrupt:
+    print('Shutting down...')
+    shutdown()
 
 
 
