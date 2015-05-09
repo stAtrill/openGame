@@ -1,4 +1,4 @@
-import _winreg as reg
+import winreg as reg
 import win32file
 
 
@@ -8,16 +8,16 @@ adapter_key = r'SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-
 def get_device_guid():
     with reg.OpenKey(reg.HKEY_LOCAL_MACHINE, adapter_key) as adapters:
         try:
-            for i in xrange(10000):
+            for i in range(10000):
                 key_name = reg.EnumKey(adapters, i)
                 with reg.OpenKey(adapters, key_name) as adapter:
                     try:
                         component_id = reg.QueryValueEx(adapter, 'ComponentId')[0]
-                        if component_id == 'tap0801':
+                        if component_id == 'tap0901':
                             return reg.QueryValueEx(adapter, 'NetCfgInstanceId')[0]
-                    except WindowsError, err:
+                    except WindowsError:
                         pass
-        except WindowsError, err:
+        except WindowsError:
             pass
 
 def CTL_CODE(device_type, function, method, access):
@@ -42,14 +42,19 @@ if __name__ == '__main__':
     print(handle.handle)
     if False:
         win32file.DeviceIoControl(handle, TAP_IOCTL_CONFIG_POINT_TO_POINT,
-                                  '\xc0\xa8\x11\x01\xc0\xa8\x11\x10', None);
+                                  b'\xc0\xa8\x11\x01\xc0\xa8\x11\x10', None);
     else:
-        win32file.DeviceIoControl(handle, TAP_IOCTL_SET_MEDIA_STATUS, '\x01\x00\x00\x00', None)
+        win32file.DeviceIoControl(handle, TAP_IOCTL_SET_MEDIA_STATUS, b'\x01\x00\x00\x00', None)
         win32file.DeviceIoControl(handle, TAP_IOCTL_CONFIG_TUN,
-                                  '\x0a\x03\x00\x01\x0a\x03\x00\x00\xff\xff\xff\x00', None)
-    while True:
-        l, p = win32file.ReadFile(handle, 2000)
-        q = p[:12] + p[16:20] + p[12:16] + p[20:]
-        win32file.WriteFile(handle, q)
-        print(p, q)
-    win32file.CloseHandle(handle)
+                                  b'\x0a\x03\x00\x01\x0a\x03\x00\x00\xff\xff\xff\x00', None)
+    try:
+        print('entered loop')
+        while True:
+            l, p = win32file.ReadFile(handle, 2000)
+            q = p[:12] + p[16:20] + p[12:16] + p[20:]
+            win32file.WriteFile(handle, q)
+            print(p, q)
+    except KeyboardInterrupt:
+        print('closed handle')
+    finally:
+        win32file.CloseHandle(handle)

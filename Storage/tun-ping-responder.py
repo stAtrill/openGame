@@ -13,7 +13,7 @@
 # The OpenWSN license applies to this file.
 #
 
-import _winreg as reg
+import winreg as reg
 import win32file
 import win32event
 import pywintypes
@@ -53,16 +53,16 @@ def get_tuntap_ComponentId():
     '''
     with reg.OpenKey(reg.HKEY_LOCAL_MACHINE, ADAPTER_KEY) as adapters:
         try:
-            for i in xrange(10000):
+            for i in range(10000):
                 key_name = reg.EnumKey(adapters, i)
                 with reg.OpenKey(adapters, key_name) as adapter:
                     try:
                         component_id = reg.QueryValueEx(adapter, 'ComponentId')[0]
                         if component_id == TUNTAP_COMPONENT_ID:
                             return reg.QueryValueEx(adapter, 'NetCfgInstanceId')[0]
-                    except WindowsError, err:
+                    except WindowsError:
                         pass
-        except WindowsError, err:
+        except WindowsError:
             pass
 
 def CTL_CODE(device_type, function, method, access):
@@ -102,7 +102,7 @@ def openTunTap():
     win32file.DeviceIoControl(
         tuntap,
         TAP_IOCTL_SET_MEDIA_STATUS,
-        '\x01\x00\x00\x00',
+        b'\x01\x00\x00\x00',
         None
     )
     
@@ -115,7 +115,7 @@ def openTunTap():
     configTunParam += TUN_IPv4_ADDRESS
     configTunParam += TUN_IPv4_NETWORK
     configTunParam += TUN_IPv4_NETMASK
-    configTunParam  = ''.join([chr(b) for b in configTunParam])
+    configTunParam  = b'\x0a\x03\x00\x01\x0a\x03\x00\x00\xff\xff\xff\x00'
     
     # switch to TUN mode (by default the interface runs in TAP mode)
     win32file.DeviceIoControl(
@@ -227,7 +227,7 @@ class ReadThread(threading.Thread):
                         # IPv4 echo request
                     
                         # print
-                        print 'Received IPv4 echo request'
+                        print ('Received IPv4 echo request')
                         
                         # create echo reply
                         echoReply = self._createIpv4EchoReply(p)
@@ -236,12 +236,12 @@ class ReadThread(threading.Thread):
                         self.transmit(echoReply)
                         
                         # print
-                        print 'Transmitted IPv4 echo reply'
+                        print ('Transmitted IPv4 echo reply')
                     
                     elif p[20]==0x00:
                         
                         # print
-                        print 'Received IPv4 echo reply'
+                        print ('Received IPv4 echo reply')
                 
             elif (p[0]&0xf0)==0x60:
                 # IPv6
@@ -257,7 +257,7 @@ class ReadThread(threading.Thread):
                         # IPv6 echo request
                         
                         # print
-                        print 'Received IPv6 echo request'
+                        print ('Received IPv6 echo request')
                         
                         # create echo reply
                         echoReply = self._createIpv6EchoReply(p)
@@ -266,12 +266,12 @@ class ReadThread(threading.Thread):
                         self.transmit(echoReply)
                         
                         # print
-                        print 'Transmitted IPv6 echo reply'
+                        print ('Transmitted IPv6 echo reply')
                     
                     elif p[40]==0x81:
                         
                         # print
-                        print 'Received IPv6 echo reply'
+                        print ('Received IPv6 echo reply')
     
     #======================== public ==========================================
     
@@ -372,7 +372,7 @@ class WriteThread(threading.Thread):
     def transmit(self,dataToTransmit):
         
         # convert to string
-        dataToTransmit  = ''.join([chr(b) for b in dataToTransmit])
+        dataToTransmit.encode('utf-8') #  = ''.join([chr(b) for b in dataToTransmit]).
         
         # write over tuntap interface
         win32file.WriteFile(self.tuntap, dataToTransmit, self.overlappedTx)
@@ -393,10 +393,10 @@ class WriteThread(threading.Thread):
         
         # create IPv4 or IPv6 echo request
         if self.createIPv6:
-            print 'Transmitting IPv6 echo request'
+            print ('Transmitting IPv6 echo request')
             return self._createIPv6echoRequest()
         else:
-            print 'Transmitting IPv4 echo request'
+            print ('Transmitting IPv4 echo request')
             return self._createIPv4echoRequest()
     
     def _createIPv4echoRequest(self):
@@ -504,8 +504,10 @@ def main():
     writeThread.start()
     
     #=== wait for Enter to stop
+    print(readThread.isAlive())
+    print(writeThread.isAlive())
     
-    raw_input("Press enter to stop...\n")
+    input("Press enter to stop...\n")
     
     readThread.close()
     writeThread.close()

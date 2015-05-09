@@ -5,9 +5,10 @@
 TODO/reference:
 -Use STUN to determine external IP: http://tools.ietf.org/html/rfc5389 , http://www.stunprotocol.org/
 -Move over to new selectors module: https://docs.python.org/3/library/selectors.html
+-Enable OVERLAPPED property to allow async tuntap use!
 '''
 #Next Task: move to selectors module (uses callbacks), finish properly recording connected peers
-#Keep alive
+#Peer management: Management of timeouts on failed connections, keep alive
 
 import socket
 import string
@@ -18,6 +19,8 @@ import urllib.request
 import struct
 import time
 import math
+import win32file
+import winreg as reg
 #import tkinter as tk Not needed until GUI
 
 #Functions:
@@ -27,14 +30,14 @@ import math
 def Initialize():
     global peerList, connList, connID, dest, udpPort, tcpPort, s, notConnected, connecting, connected, \
     verboseMode, incomingConnection, outgoingConnection, updatesPerSecond, mainSocket, readable, writable, \
-    recvData, settings, settingsFormatString, myIP, myIPtimestamp
+    recvData, settings, settingsFormatString, myIP, myIPtimestamp, useAutosetup
     
     peerList = []
     connList = [[], []]
     settings = [0, 0]       #[publicIP, timestamp]
 
     #Some settings
-    verboseMode = False
+    verboseMode = True
     settingsFormatString = "4sI"
 
     #This is a persistent identifier that we need to track
@@ -47,6 +50,8 @@ def Initialize():
     
     readable = 0
     writable = 1
+    
+    useAutosetup = True
     
     incomingConnection = True
     outgoingConnection = False
@@ -101,6 +106,7 @@ def Initialize():
             #Update the IP address if the stored one is valid and current
             if int.from_bytes(a, 'big') > 0 and time.time() - b < staleIPtimeout:
                 alert("Public IP restored from saved values.", "_all")
+                alert("Old IP address is " + str(math.floor(time.time() - b)) + " seconds old.")
                 settings[myIP] = socket.inet_ntoa(a)
         except:
             pass    #The unpacking failed for some reason, or the file was otherwise invalid. Oh well.
@@ -118,14 +124,108 @@ def Initialize():
             settings[myIPtimestamp] = math.floor(time.time())
         alert(settings[myIP])
 
+#This class encapsulates the TUNTAP object (mainly so I can collapse it and not have to look at this cryptic eyesore)
+#Even though there were some examples online, they only provided partial functionality, and were exceedingly cryptic
+#So this was written as an alternative
+class tuntapWin:
 
+    #A useful constant
+    adapterKey = r'SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE10318}'
+    
+    #I would love to find a better way to do these
+    #---------------------------------------------
+    """By default we operate as a "tap" virtual ethernet
+    802.3 interface, but we can emulate a "tun"
+    interface (point-to-point IPv4) through the
+    TAP_WIN_IOCTL_CONFIG_POINT_TO_POINT or
+    TAP_WIN_IOCTL_CONFIG_TUN ioctl."""
+    def CTL_CODE(self, device_type, function, method, access):
+        return (device_type << 16) | (access << 14) | (function << 2) | method
+    def TAP_CONTROL_CODE(self, request, method):
+        return self.CTL_CODE(34, request, method, 0)
+    #---------------------------------------------
+        
+    #Returns the GUID of the tap device, or False if it cannot be found
+    def getDeviceGUID(self):
+        with reg.OpenKey(reg.HKEY_LOCAL_MACHINE, self.adapterKey) as adapters:
+            try:
+                for i in range(1000):
+                    keyName = reg.EnumKey(adapters, i)
+                    with reg.OpenKey(adapters, keyName) as adapter:
+                        try:
+                            componentID = reg.QueryValueEx(adapter, 'ComponentId')[0]
+                            if componentID == 'tap0801' or componentID == 'tap0901':
+                                return reg.QueryValueEx(adapter, 'NetCfgInstanceId')[0]
+                        except WindowsError:
+                            pass
+            except WindowsError:
+                pass
+            
+            #If no key was found
+            alert("Failed to locate a TAP device in the windows registry.", "_all")
+            return False
+    
+    def __init__(self, autoSetup = False):
+        #These can be used, or not.
+        self.myGUID = ""
+        self.myInterface = 0
+        
+        #Some function encapsulation
+        #In case anyone else reads this, the tap control codes use the windows io control code interface to pass special
+        #codes to the tap driver. Also, some constants are borrowed from the win iocontrol library (which are simply replaced with numbers here) 
+        self.TAP_IOCTL_GET_MAC =                     self.TAP_CONTROL_CODE(1, 0)
+        self.TAP_IOCTL_GET_VERSION =                 self.TAP_CONTROL_CODE(2, 0)
+        self.TAP_IOCTL_GET_MTU =                     self.TAP_CONTROL_CODE(3, 0)
+        self.TAP_IOCTL_GET_INFO =                    self.TAP_CONTROL_CODE(4, 0)
+        self.TAP_IOCTL_CONFIG_POINT_TO_POINT =       self.TAP_CONTROL_CODE(5, 0)        #This call has been obsoleted, use CONFIG_TUN instead
+        self.TAP_IOCTL_SET_MEDIA_STATUS =            self.TAP_CONTROL_CODE(6, 0)
+        self.TAP_IOCTL_CONFIG_DHCP_MASQ =            self.TAP_CONTROL_CODE(7, 0)
+        self.TAP_IOCTL_GET_LOG_LINE =                self.TAP_CONTROL_CODE(8, 0)
+        self.TAP_IOCTL_CONFIG_DHCP_SET_OPT=          self.TAP_CONTROL_CODE(9, 0)
+        self.TAP_IOCTL_CONFIG_TUN =                  self.TAP_CONTROL_CODE(10, 0)
+
+        #Whether the object should attempt to initialize itself
+        if autoSetup:
+            self.myGUID = self.getDeviceGUID()
+            
+            #Diagnostics
+            alert("Tap GUID: " + self.myGUID)
+            self.myInterface = self.createInterface()
+            self.setMediaConnectionStatus(True)
+    
+    #A function to make sure we close our handle and reset media status
+    def __del__(self):
+        win32file.CloseHandle(self.myInterface)
+        self.setMediaConnectionStatus(False)
+        print("Handle closed, media disconnected.")
+    
+    #A function to set the media status as either connected or disconnected in windows
+    def setMediaConnectionStatus(self, toConnected):
+        win32file.DeviceIoControl(self.myInterface, self.TAP_IOCTL_SET_MEDIA_STATUS, toConnected.to_bytes(4, "little"), None)
+
+    def createInterface(self):
+        if self.myGUID == "":
+            alert("GUID is empty - the device needs to be identified before calling this function.", "_all")
+            return False
+        else:
+            try:
+                return win32file.CreateFile(r'\\.\Global\%s.tap' % self.myGUID,
+                                      win32file.GENERIC_READ | win32file.GENERIC_WRITE,
+                                      win32file.FILE_SHARE_READ | win32file.FILE_SHARE_WRITE,
+                                      None, win32file.OPEN_EXISTING,
+                                      win32file.FILE_ATTRIBUTE_SYSTEM, # | win32file.FILE_FLAG_OVERLAPPED, #TODO: will need to implement this for asynchronous operations
+                                      None)
+                                      
+            except:
+                alert("Failed to create interface to TAP device.", "_all")
+                return False
+        
 #This function will output to the console depending on set verbosity level
 def alert(verbose, nonverbose =""):
     if verboseMode or nonverbose == "_all":
         print(verbose)
     elif nonverbose:
         print(nonverbose)
-
 
 #This function properly shuts down the program
 def shutdown():
@@ -139,7 +239,6 @@ def shutdown():
     for sock in connList[readable][1:] + connList[writable]:
         sock.shutdown(socket.SHUT_RDWR)
         sock.close()
-
 
 #This function completely handles making connection to a tracker
 def trackerConnect(destAddress):
@@ -176,7 +275,6 @@ def trackerConnect(destAddress):
     #If we didn't return earlier, the response is bad
     return False
 
-
 #A function to announce to trackers
 def Announce():
     #Prepare payload
@@ -200,7 +298,6 @@ def Announce():
     s.sendto(payload, dest)
     alert("Announced to tracker.", "_all")
 
-
 #A function to index returned addresses into the peerlist
 #Used to initialize an empty peerlist
 def indexAddresses(rawAddr):
@@ -213,7 +310,6 @@ def indexAddresses(rawAddr):
 
     #Diagnostics
     alert(peerList)
-
 
 #A function to set the status of a peer in the list.1
 #Will add an address into the peerlist if it doesn't already exist.
@@ -279,7 +375,6 @@ def peerConnection(incom, address = ""):
         connList[writable].append(peerSock)
         setPeerStatus(address, connecting)
         
-
 #The main manager loop
 def runManager():
     #A variable to indicate when to stop
@@ -337,6 +432,11 @@ def runManager():
         for s in wSock:
             alert('New connections completed.')
             #Set peers to connected state, etc
+            
+        #DEBUG: This is to experiment with the tap interface
+        print(myTap.myInterface)
+        print(win32file.ReadFile(myTap.myInterface, 2000))
+        print("something came!")
 
         #This loop sleeps so that we will run the loop approx
         #uPS times per second
@@ -348,6 +448,10 @@ def runManager():
 #-------------------------
 Initialize()
 alert("Initialized. Verbose mode enabled.", "Initialized. Verbose mode disabled.")
+
+#Instantiate our tuntap class and have it auto-setup
+myTap = tuntapWin(useAutosetup)
+alert("Tuntap device initialized, interface created.", "_all")
 
 
 #Connect to our tracker of choice, and announce if it succeeds
