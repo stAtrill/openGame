@@ -20,7 +20,12 @@ import struct
 import time
 import math
 import win32file
+import pywintypes
+import win32event
+import win32api
 import winreg as reg
+import queue
+import threading
 #import tkinter as tk Not needed until GUI
 
 #Functions:
@@ -30,15 +35,17 @@ import winreg as reg
 def Initialize():
     global peerList, connList, connID, dest, udpPort, tcpPort, s, notConnected, connecting, connected, \
     verboseMode, incomingConnection, outgoingConnection, updatesPerSecond, mainSocket, readable, writable, \
-    recvData, settings, settingsFormatString, myIP, myIPtimestamp, useAutosetup
+    recvData, settings, settingsFormatString, myIP, myIPtimestamp, useTUNTAPAutosetup, useBackupBroadcastDectection, \
+    loopbackSocket, ethernetMTU, read, write
     
     peerList = []
     connList = [[], []]
     settings = [0, 0]       #[publicIP, timestamp]
 
     #Some settings
-    verboseMode = True
+    verboseMode = False
     settingsFormatString = "4sI"
+    ethernetMTU = 1500
 
     #This is a persistent identifier that we need to track
     connID = b""
@@ -51,7 +58,15 @@ def Initialize():
     readable = 0
     writable = 1
     
-    useAutosetup = True
+    read = 0
+    write = 1
+    
+    #Should the TUNTAP module set itself up?
+    useTUNTAPAutosetup = True
+    #This uses an alternate method for detecting broadcasts (on WIN 7/8) if the TAP device isn't picking them up
+    #If the device is picking them up, it shouldn't be used or every broadcast will be dealt with twice
+    useBackupBroadcastDectection = False
+    loopbackSocket = 0
     
     incomingConnection = True
     outgoingConnection = False
@@ -61,7 +76,7 @@ def Initialize():
     myIPtimestamp = 1
 
     #Set the updates per second value
-    updatesPerSecond = 5
+    updatesPerSecond = 15
     
     #dest = ("open.demonii.com", 1337)
     #backups
@@ -169,6 +184,21 @@ class tuntapWin:
         #These can be used, or not.
         self.myGUID = ""
         self.myInterface = 0
+        self.trimEthnHeaders = True
+        self.ethernetMTU = ethernetMTU
+        self.myMACaddr = b""            #A workaround, as I haven't figured out how to get the return from the GET_MAC control code
+        self.remoteMACaddr = b"\xc4\x15\x53\xb3\x04\x33"    #Basically, when injecting packets, they come from a completely arbitrary address.
+        self.readDataQueue = queue.Queue()
+        self.writeDataQueue = queue.Queue()
+        self.dataThreads = []
+        
+        #Set up two overlapped structure for async operation, one for reading, the other for writing
+        self.overlapped = []
+        for i in range(2):
+            self.overlapped.append(pywintypes.OVERLAPPED())
+            self.overlapped[i].hEvent  = win32event.CreateEvent(None, 0, 0, None)
+        self.readBuffer = win32file.AllocateReadBuffer(self.ethernetMTU)
+        
         
         #Some function encapsulation
         #In case anyone else reads this, the tap control codes use the windows io control code interface to pass special
@@ -183,15 +213,22 @@ class tuntapWin:
         self.TAP_IOCTL_GET_LOG_LINE =                self.TAP_CONTROL_CODE(8, 0)
         self.TAP_IOCTL_CONFIG_DHCP_SET_OPT=          self.TAP_CONTROL_CODE(9, 0)
         self.TAP_IOCTL_CONFIG_TUN =                  self.TAP_CONTROL_CODE(10, 0)
-
+        
         #Whether the object should attempt to initialize itself
         if autoSetup:
             self.myGUID = self.getDeviceGUID()
-            
-            #Diagnostics
             alert("Tap GUID: " + self.myGUID)
+            
             self.myInterface = self.createInterface()
             self.setMediaConnectionStatus(True)
+            
+            self.dataThreads.append(threading.Thread(target=self.dataListenerThread, args=(self.readDataQueue,)))
+            self.dataThreads.append(threading.Thread(target=self.dataWriterThread, args=(self.writeDataQueue,)))
+            self.dataThreads[0].start()
+            alert('Data listener thread started.', '_all')
+            self.dataThreads[1].start()
+            alert('Data injector thread started.', '_all')
+            
     
     #A function to make sure we close our handle and reset media status
     def __del__(self):
@@ -213,13 +250,59 @@ class tuntapWin:
                                       win32file.GENERIC_READ | win32file.GENERIC_WRITE,
                                       win32file.FILE_SHARE_READ | win32file.FILE_SHARE_WRITE,
                                       None, win32file.OPEN_EXISTING,
-                                      win32file.FILE_ATTRIBUTE_SYSTEM, # | win32file.FILE_FLAG_OVERLAPPED, #TODO: will need to implement this for asynchronous operations
+                                      win32file.FILE_ATTRIBUTE_SYSTEM | win32file.FILE_FLAG_OVERLAPPED,
                                       None)
                                       
             except:
                 alert("Failed to create interface to TAP device.", "_all")
                 return False
-        
+    
+    #A function to constantly grab data from the tap device, perform some basic filtering, and enter the results in a queue
+    def dataListenerThread(self, resultsQueue):
+        while True:
+            self.readResult = win32file.ReadFile(self.myInterface, self.readBuffer, self.overlapped[read])
+            win32event.WaitForSingleObject(self.overlapped[read].hEvent, win32event.INFINITE)
+
+            #MAC Address autodiscover
+            #WORKAROUND: If our own MAC hasn't yet been discovered, auto-set it now
+            if not self.myMACaddr:
+                self.myMACaddr = bytes(self.readResult[1][6:12])
+                alert("MAC address auto-discovered: " + str(self.myMACaddr), '_all')
+                    
+            #Truncate to the actual data - only for IP Packets
+            if bytes(self.readResult[1][12:14]) == b"\x08\x00":
+                self.dataLen = int.from_bytes(self.readResult[1][16:18], 'big')
+                resultsQueue.put(bytes(self.readResult[1][14*self.trimEthnHeaders:14+self.dataLen]))
+            else:
+                alert('Non-ip packet was discarded. EtherType code: ' + str(bytes(self.readResult[1][12:14])))
+    
+    def dataWriterThread(self, toWriteQueue):
+        while True:
+            if not toWriteQueue.empty():
+                #Add Ethernet header back onto the packet
+                self.d = self.myMACaddr + self.remoteMACaddr + b"\x08\x00"  #Because, as of right now, this only carries ipv4 traffic
+                print('Injecting packet on adapter')
+                win32file.WriteFile(self.tuntap, self.d + toWriteQueue.get(), self.overlapped[write])
+                win32event.WaitForSingleObject(self.overlapped[write].hEvent, win32event.INFINITE)
+            else:
+                time.sleep(0.05)
+    
+    def deviceHasData(self):
+        if not self.readDataQueue.empty():
+            return self.readDataQueue.qsize()
+        else:
+            return False
+                
+#This function sets up a backup method for receiving broadcasts on win 7 and 8
+#Essentially, binds a raw socket to the loopback interface, and for some magical reason, broadcasts appear
+#Reference: https://github.com/dechamps/WinIPBroadcast/blob/master/WinIPBroadcast.c
+def initBroadcastLoopbackMethod():
+    loopbackSocket = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_IP)
+    loopbackSocket.bind(('127.0.0.1', 1))
+    
+    #Add to the connection list
+    connList[readable].append(loopbackSocket)
+
 #This function will output to the console depending on set verbosity level
 def alert(verbose, nonverbose =""):
     if verboseMode or nonverbose == "_all":
@@ -252,7 +335,7 @@ def trackerConnect(destAddress):
     #Decode response
     #------------------------
     #TODO: make this select based, and give user option to wait or move on if response is slow
-    recvData, addr = s.recvfrom(1024)
+    recvData, addr = s.recvfrom(ethernetMTU)
 
     #Perform integrity checks and
     #Return True if response checks out
@@ -374,7 +457,21 @@ def peerConnection(incom, address = ""):
             pass
         connList[writable].append(peerSock)
         setPeerStatus(address, connecting)
-        
+
+#This function sends data to connected peers! Woohoo!
+def routeAndSend(dataToSend):
+    #Check first to see if the packet is a broadcast packet
+    #The position we read from changes depending on whether ethernet headers are stripped, so make sure
+    #setting is correct in the TUNTAP class
+    if dataToSend[16:20] == b'\xff\xff\xff\xff':
+        for peerSock in connList[readable]:
+            if peerSock != mainSocket and peerSock != loopbackSocket:
+                peerSock.sendall(dataToSend)
+                print("Sent data to : " + str(peerSock.getpeername())) #, '_all')
+    else:
+        #Here we send data to a single peer
+        pass
+
 #The main manager loop
 def runManager():
     #A variable to indicate when to stop
@@ -397,7 +494,7 @@ def runManager():
             #0 : Reconnect timeout
             #1 : Total time disconnected
 
-            #None of anything applies to our own ip, so skip
+            #Nothing of anything applies to our own IP, so skip
             if a != settings[myIP]:
                 if connStatus == notConnected:
                     t = connStorage[0] #The first stored variable is the timeout
@@ -420,23 +517,38 @@ def runManager():
             if s == mainSocket:
                 peerConnection(incomingConnection)
 
-            #Handle incoming data
-            else:
-                print('Some other socket!')
+            #Handle broadcasts picked up via the loopback socket
+            elif s == loopbackSocket:
+                print('Loopback socket has detected a broadcast')
+                recvData = s.recv(ethernetMTU)
+                alert(str(recvData), '_all')
+                routeAndSend(recvData)
 
-                #TEMPORARY
-                #Read from the socket and dump to console
-                recvData, addr = s.recvfrom(1024)
-                print(recvData)
+            else:
+                #Receive the data
+                recvData, addr = s.recvfrom(ethernetMTU)
+                
+                #Diagnostics
+                print('Incoming data from ' + str(addr))
+                alert(recvData, '_all')
+                
+                #Send packets to the TAP adapter write queue
+                myTap.toWriteQueue.put(recvData)
+                
 
         for s in wSock:
-            alert('New connections completed.')
-            #Set peers to connected state, etc
-            
-        #DEBUG: This is to experiment with the tap interface
-        print(myTap.myInterface)
-        print(win32file.ReadFile(myTap.myInterface, 2000))
-        print("something came!")
+            alert('New connections completed.', '_all')
+            #Set peers to connected state, move socket to readable list
+            print(connList)
+            connList[readable].append(s)
+            connList[writable].remove(s)
+            print(connList)     #Remove once correct functionality is ensured
+            setPeerStatus(address, connected)
+        
+        #Check the adapter for data
+        if myTap.deviceHasData():
+            while myTap.deviceHasData():
+                routeAndSend(myTap.readDataQueue.get())
 
         #This loop sleeps so that we will run the loop approx
         #uPS times per second
@@ -450,7 +562,7 @@ Initialize()
 alert("Initialized. Verbose mode enabled.", "Initialized. Verbose mode disabled.")
 
 #Instantiate our tuntap class and have it auto-setup
-myTap = tuntapWin(useAutosetup)
+myTap = tuntapWin(useTUNTAPAutosetup)
 alert("Tuntap device initialized, interface created.", "_all")
 
 
@@ -463,7 +575,7 @@ if trackerConnect(dest):
 
 #Decode announce response
 #------------------------
-recvData, addr = s.recvfrom(1024)
+recvData, addr = s.recvfrom(ethernetMTU)
 alert("Announce response: " + str(recvData))
 if len(recvData) > 19:
     #TODO: check action, etc, blahblah
