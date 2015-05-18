@@ -282,7 +282,7 @@ class tuntapWin:
                 #Add Ethernet header back onto the packet
                 self.d = self.myMACaddr + self.remoteMACaddr + b"\x08\x00"  #Because, as of right now, this only carries ipv4 traffic
                 print('Injecting packet on adapter')
-                win32file.WriteFile(self.tuntap, self.d + toWriteQueue.get(), self.overlapped[write])
+                win32file.WriteFile(self.myInterface, self.d + toWriteQueue.get(), self.overlapped[write])
                 win32event.WaitForSingleObject(self.overlapped[write].hEvent, win32event.INFINITE)
             else:
                 time.sleep(0.05)
@@ -363,7 +363,7 @@ def Announce():
     #Prepare payload
     a = 0x1.to_bytes(4, 'big') #action
     transID = random.randrange(65535).to_bytes(4, 'big') #TransID
-    iH = 'opnGameGroundContro1'.encode('ascii')
+    iH = 'opnGameGroundContro6'.encode('ascii')
     myID = ('openGame'+''.join(random.choice(string.ascii_letters + string.digits) for _ in range(12))).encode('ascii')
     d = 0x0.to_bytes(8, 'big')
     l = 0x987.to_bytes(8, 'big')
@@ -396,6 +396,7 @@ def indexAddresses(rawAddr):
 
 #A function to set the status of a peer in the list.1
 #Will add an address into the peerlist if it doesn't already exist.
+#Address should be a tuple
 def setPeerStatus(addr, status):
     addPeer = True
 
@@ -533,7 +534,7 @@ def runManager():
                 alert(recvData, '_all')
                 
                 #Send packets to the TAP adapter write queue
-                myTap.toWriteQueue.put(recvData)
+                myTap.writeDataQueue.put(recvData)
                 
 
         for s in wSock:
@@ -543,7 +544,7 @@ def runManager():
             connList[readable].append(s)
             connList[writable].remove(s)
             print(connList)     #Remove once correct functionality is ensured
-            setPeerStatus(address, connected)
+            setPeerStatus(s.getpeername(), connected)
         
         #Check the adapter for data
         if myTap.deviceHasData():
