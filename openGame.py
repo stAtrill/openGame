@@ -4,10 +4,11 @@
 '''
 TODO/reference:
 -Use STUN to determine external IP: http://tools.ietf.org/html/rfc5389 , http://www.stunprotocol.org/
--Move over to new selectors module: https://docs.python.org/3/library/selectors.html
--Enable OVERLAPPED property to allow async tuntap use!
+-Handle disconnection situations
+-Use upnp to open ports, implement miniUPnP https://github.com/miniupnp/miniupnp/blob/master/miniupnpc/pymoduletest.py
+-Retrying of failed connections
+-Program does not properly shutdown
 '''
-#Next Task: move to selectors module (uses callbacks), finish properly recording connected peers
 #Peer management: Management of timeouts on failed connections, keep alive
 
 import socket
@@ -33,7 +34,7 @@ import threading
 
 #A function to initialize everything
 def Initialize():
-    global peerList, connList, connID, dest, udpPort, tcpPort, s, notConnected, connecting, connected, \
+    global peerList, connList, connID, dest, udpPort, tcpPort, s, notConnected, connecting, connected, removed, \
     verboseMode, incomingConnection, outgoingConnection, updatesPerSecond, mainSocket, readable, writable, \
     recvData, settings, settingsFormatString, myIP, myIPtimestamp, useTUNTAPAutosetup, useBackupBroadcastDectection, \
     loopbackSocket, ethernetMTU, read, write
@@ -46,6 +47,7 @@ def Initialize():
     verboseMode = False
     settingsFormatString = "4sI"
     ethernetMTU = 1500
+    #connectionRetryCount = 0    #Never retry a connection, until the program properly handles non-blocking sockets with timeouts
 
     #This is a persistent identifier that we need to track
     connID = b""
@@ -54,6 +56,7 @@ def Initialize():
     notConnected = 0
     connecting = 1
     connected = 2
+    removed = 3
     
     readable = 0
     writable = 1
@@ -281,7 +284,7 @@ class tuntapWin:
             if not toWriteQueue.empty():
                 #Add Ethernet header back onto the packet
                 self.d = self.myMACaddr + self.remoteMACaddr + b"\x08\x00"  #Because, as of right now, this only carries ipv4 traffic
-                print('Injecting packet on adapter')
+                alert('Injecting packet on adapter')
                 win32file.WriteFile(self.myInterface, self.d + toWriteQueue.get(), self.overlapped[write])
                 win32event.WaitForSingleObject(self.overlapped[write].hEvent, win32event.INFINITE)
             else:
@@ -322,6 +325,8 @@ def shutdown():
     for sock in connList[readable][1:] + connList[writable]:
         sock.shutdown(socket.SHUT_RDWR)
         sock.close()
+        
+        alert('Shutdown complete. Exiting...', '_all')
 
 #This function completely handles making connection to a tracker
 def trackerConnect(destAddress):
@@ -363,7 +368,7 @@ def Announce():
     #Prepare payload
     a = 0x1.to_bytes(4, 'big') #action
     transID = random.randrange(65535).to_bytes(4, 'big') #TransID
-    iH = 'opnGameGroundContro6'.encode('ascii')
+    iH = 'opnGameGroundControl'.encode('ascii')
     myID = ('openGame'+''.join(random.choice(string.ascii_letters + string.digits) for _ in range(12))).encode('ascii')
     d = 0x0.to_bytes(8, 'big')
     l = 0x987.to_bytes(8, 'big')
@@ -392,11 +397,11 @@ def indexAddresses(rawAddr):
         peerList.append([a, p, notConnected, [0]])
 
     #Diagnostics
-    alert(peerList)
+    alert("Peerlist: \n"+str(peerList))
 
-#A function to set the status of a peer in the list.1
+#A function to set the status of a peer in the list.
 #Will add an address into the peerlist if it doesn't already exist.
-#Address should be a tuple
+#Rewrite code with 'else' clause for search
 def setPeerStatus(addr, status):
     addPeer = True
 
@@ -411,15 +416,21 @@ def setPeerStatus(addr, status):
 
     
     if addPeer:
-        #Add peer into the peerlist
-        peerList.append([addr[0], addr[1], status, [0]])
-        alert('Added to peerlist.', "_all")
+        if status != removed:
+            #Add peer into the peerlist
+            peerList.append([addr[0], addr[1], status, [0]])
+            alert('Added to peerlist.', "_all")
+        else:
+            alert('The peer was not found in the peerlist to remove.', "_all")
     else:
         #Edit the peer's status
         #Somehow this feels like a hack - double check to make sure this doesn't break stuff
         #This will eventually need to reset the context-sensitive variables when the status changes
         if status == notConnected:
             a = 30 #Setting a new timeout
+        
+        elif status == removed:
+            peerList.pop(pos)   #Remove the position from the list
         else:
             a = peerList[pos][3]    #Preserves the existing storage
         
@@ -428,8 +439,10 @@ def setPeerStatus(addr, status):
         alert("Peer at " + str(addr) + " set to not connected.", "_all")
     elif status == connecting:
         alert("Peer at " + str(addr) + " set to connecting.", "_all")
-    else:
+    elif status == connected:
         alert("Peer at " + str(addr) + " set to connected.", "_all")
+    elif status == removed:
+        alert("Peer at " + str(addr) + " was removed from the peer list.", "_all")
 
 #A potentially pointless function to connect to peers
 def peerConnection(incom, address = ""):
@@ -468,10 +481,16 @@ def routeAndSend(dataToSend):
         for peerSock in connList[readable]:
             if peerSock != mainSocket and peerSock != loopbackSocket:
                 peerSock.sendall(dataToSend)
-                print("Sent data to : " + str(peerSock.getpeername())) #, '_all')
+                alert("Broadcast data sent to : " + str(peerSock.getpeername()), '_all')
     else:
         #Here we send data to a single peer
-        pass
+        #Search the peerlist for the peer, then send
+        for peerSock in connList[readable]:
+            if peerSock != mainSocket and peerSock != loopbackSocket:
+                print(socket.inet_ntoa(dataToSend[16:20]), peerSock.getpeername()[0])
+                if peerSock.getpeername()[0] == dataToSend[16:20]:
+                    peerSock.sendall(dataToSend)
+                    alert("Sent data only to : " + str(peerSock.getpeername()), '_all')
 
 #The main manager loop
 def runManager():
@@ -488,7 +507,7 @@ def runManager():
         #Manage peer list
         #---------------------------------
         #Here, we will loop over all peers, updating and connecting, etc
-        #We loop over a shallow copy, because (insert valid reason)
+        #We loop over a shallow copy, because (insert valid reason) -> we may modify the list inside of this loop
         for i, (a, b, connStatus, connStorage) in enumerate(peerList[:]):
             #Handle all unconnected peers
             #Unconnected peer storage is as follows:
@@ -510,8 +529,7 @@ def runManager():
 
         #Manage all sockets
         #---------------------------------
-        #TODO: Rewrite using the new selectors module
-        rSock, wSock, e = select.select(connList[0],connList[1],[], 0)
+        rSock, wSock, e = select.select(connList[readable],connList[writable],[], 0)
         for s in rSock:
             alert('New socket(s) available to read.')
             #Handle new incoming connections
@@ -520,30 +538,38 @@ def runManager():
 
             #Handle broadcasts picked up via the loopback socket
             elif s == loopbackSocket:
-                print('Loopback socket has detected a broadcast')
+                alert('Loopback socket has detected a broadcast')
                 recvData = s.recv(ethernetMTU)
                 alert(str(recvData), '_all')
                 routeAndSend(recvData)
 
             else:
                 #Receive the data
-                recvData, addr = s.recvfrom(ethernetMTU)
-                
-                #Diagnostics
-                print('Incoming data from ' + str(addr))
-                alert(recvData, '_all')
-                
-                #Send packets to the TAP adapter write queue
-                myTap.writeDataQueue.put(recvData)
+                #This is in a try block to catch force-closed connection exceptions
+                try:
+                    recvData, addr = s.recvfrom(ethernetMTU)
+                except socket.error:
+                    #Connection forcefully closed
+                    print('Connection from ' + str(addr) + ' has forcefully closed. Probable cause: crash')
+                    connList[readable].remove(s)
+                    print(s.getpeername())
+                    print(addr)
+                    print(recvData)
+                    setPeerStatus(s.getpeername(), removed)
+                else:
+                    #Diagnostics
+                    alert('Incoming data from ' + str(addr))
+                    alert(recvData)
+                    
+                    #Send packets to the TAP adapter write queue
+                    myTap.writeDataQueue.put(recvData)
                 
 
         for s in wSock:
             alert('New connections completed.', '_all')
             #Set peers to connected state, move socket to readable list
-            print(connList)
             connList[readable].append(s)
             connList[writable].remove(s)
-            print(connList)     #Remove once correct functionality is ensured
             setPeerStatus(s.getpeername(), connected)
         
         #Check the adapter for data
@@ -571,6 +597,8 @@ alert("Tuntap device initialized, interface created.", "_all")
 if trackerConnect(dest):
     #Store connection ID and announce
     Announce()
+else:
+    print('Connection to tracker failed')
 
 
 
@@ -591,7 +619,6 @@ else:
 try:
     runManager()
 except KeyboardInterrupt:
-    print('Shutting down...')
     shutdown()
 
 
