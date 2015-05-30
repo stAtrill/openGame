@@ -6,27 +6,21 @@ TODO/reference:
 -Use STUN to determine external IP: http://tools.ietf.org/html/rfc5389 , http://www.stunprotocol.org/
 -Handle disconnection situations
 -Use upnp to open ports, implement miniUPnP https://github.com/miniupnp/miniupnp/blob/master/miniupnpc/pymoduletest.py
--Retrying of failed connections
--Program does not properly shutdown
+-Detecting failed connections
+-Test for proper shutdown behavior
+-'with' statement when opening settings file in Initialize
 '''
 #Peer management: Management of timeouts on failed connections, keep alive
 
-import socket
-import string
-import random
-import select
-import time
-import urllib.request
-import struct
-import time
-import math
+import socket, string, random, select, time, struct, math, urllib.request, signal
+
 import win32file
 import pywintypes
 import win32event
 import win32api
 import winreg as reg
-import queue
-import threading
+
+import queue, threading
 #import tkinter as tk Not needed until GUI
 
 #Functions:
@@ -225,12 +219,12 @@ class tuntapWin:
             self.myInterface = self.createInterface()
             self.setMediaConnectionStatus(True)
             
-            self.dataThreads.append(threading.Thread(target=self.dataListenerThread, args=(self.readDataQueue,)))
-            self.dataThreads.append(threading.Thread(target=self.dataWriterThread, args=(self.writeDataQueue,)))
+            self.dataThreads.append(threading.Thread(target=self.dataListenerThread, args=(self.readDataQueue,), daemon = True))
+            self.dataThreads.append(threading.Thread(target=self.dataWriterThread, args=(self.writeDataQueue,), daemon = True))
             self.dataThreads[0].start()
-            alert('Data listener thread started.', '_all')
+            alert('Data listener thread started as daemon.', '_all')
             self.dataThreads[1].start()
-            alert('Data injector thread started.', '_all')
+            alert('Data injector thread started as daemon.', '_all')
             
     
     #A function to make sure we close our handle and reset media status
@@ -314,7 +308,7 @@ def alert(verbose, nonverbose =""):
         print(nonverbose)
 
 #This function properly shuts down the program
-def shutdown():
+def shutdown(*args):
     #Write all settings to file
     #---------------------------
     with open('openGame settings', 'wb') as sttngFile:
@@ -326,7 +320,7 @@ def shutdown():
         sock.shutdown(socket.SHUT_RDWR)
         sock.close()
         
-        alert('Shutdown complete. Exiting...', '_all')
+    alert('Shutdown complete. Exiting...', '_all')
 
 #This function completely handles making connection to a tracker
 def trackerConnect(destAddress):
@@ -368,7 +362,7 @@ def Announce():
     #Prepare payload
     a = 0x1.to_bytes(4, 'big') #action
     transID = random.randrange(65535).to_bytes(4, 'big') #TransID
-    iH = 'opnGameGroundControl'.encode('ascii')
+    iH = 'opnGameGroundContro7'.encode('ascii')
     myID = ('openGame'+''.join(random.choice(string.ascii_letters + string.digits) for _ in range(12))).encode('ascii')
     d = 0x0.to_bytes(8, 'big')
     l = 0x987.to_bytes(8, 'big')
@@ -402,39 +396,40 @@ def indexAddresses(rawAddr):
 #A function to set the status of a peer in the list.
 #Will add an address into the peerlist if it doesn't already exist.
 #Rewrite code with 'else' clause for search
-def setPeerStatus(addr, status):
-    addPeer = True
+def setPeerStatus(addr, status, peerSock = 0):
 
-    #Brief search to see if the peer is currently in our list
-    for i, (a, b, c, d) in enumerate(peerList):
+    #Brief search to see if the peer is currently in our list, adding it if not
+    for pos, (a, b, c, d) in enumerate(peerList):
         if (a, b) == addr:
             alert("Peer " + str(addr) + " already exists in the peer list.", "_all")
-
-            #Record the peer's position and toggle flag so peer is not added
-            pos = i
-            addPeer = False
-
-    
-    if addPeer:
+            break
+    else:
         if status != removed:
-            #Add peer into the peerlist
-            peerList.append([addr[0], addr[1], status, [0]])
+            #Add peer into the peerlist, tracking both the address and socket
+            peerList.append([addr[0], addr[1], status, [peerSock]])
             alert('Added to peerlist.', "_all")
+            alert(peerSock)
         else:
             alert('The peer was not found in the peerlist to remove.', "_all")
+
+        
+    #Edit the peer's status
+    if status == removed:
+        peerList.pop(pos)   #Remove the position from the list
+        
     else:
-        #Edit the peer's status
-        #Somehow this feels like a hack - double check to make sure this doesn't break stuff
-        #This will eventually need to reset the context-sensitive variables when the status changes
         if status == notConnected:
             a = 30 #Setting a new timeout
-        
-        elif status == removed:
-            peerList.pop(pos)   #Remove the position from the list
+            
+        elif status == connecting:
+            a = peerList[pos][3] = peerSock     #We store the peer's socket in the storage
+
         else:
             a = peerList[pos][3]    #Preserves the existing storage
-        
+            
         peerList[pos] = [peerList[pos][0], peerList[pos][1], status, a]
+    
+    #Print diagnostic text
     if status == notConnected:
         alert("Peer at " + str(addr) + " set to not connected.", "_all")
     elif status == connecting:
@@ -450,7 +445,7 @@ def peerConnection(incom, address = ""):
         #Handle the new incoming connection
         peerSock, peerAddr = mainSocket.accept()
         alert('Accepted a connection from ' + str(peerAddr), "_all")
-        setPeerStatus(peerAddr, connected)
+        setPeerStatus(peerAddr, connected, peerSock)
 
         #Add to the connection list
         connList[readable].append(peerSock)
@@ -470,7 +465,7 @@ def peerConnection(incom, address = ""):
         except:
             pass
         connList[writable].append(peerSock)
-        setPeerStatus(address, connecting)
+        setPeerStatus(address, connecting, peerSock)
 
 #This function sends data to connected peers! Woohoo!
 def routeAndSend(dataToSend):
@@ -491,6 +486,33 @@ def routeAndSend(dataToSend):
                 if peerSock.getpeername()[0] == dataToSend[16:20]:
                     peerSock.sendall(dataToSend)
                     alert("Sent data only to : " + str(peerSock.getpeername()), '_all')
+
+#These are placed all in one class for legibility, and to reduce function spam
+class routingTools:
+    def __init__(self):
+        #Create the in-use IP list (maximum 254 addresses, 0 will always be self)
+        #TODO: Evaluate if *.255 can be issued
+        self.addrInUse = []
+        for i in range(255):
+            self.addrInUse.append(False)
+        
+        #Reserve the first address
+        self.addrInUse[0] = True
+    
+    #Just an encapsulation for legibility
+    #Basically, returns the first address marked as in use
+    def getNewAddr(self):
+        a = self.addrInUse.index(False)
+        self.addrInUse[a] = True
+        return a
+
+    #Marks a previously reserved address as free
+    def freeAddr(self, addr):
+        self.addrInUse[addr] = False
+        return addr
+        
+
+
 
 #The main manager loop
 def runManager():
@@ -552,10 +574,17 @@ def runManager():
                     #Connection forcefully closed
                     print('Connection from ' + str(addr) + ' has forcefully closed. Probable cause: crash')
                     connList[readable].remove(s)
-                    print(s.getpeername())
-                    print(addr)
+                    
+                    #Diagnostics
+                    print("Peername: " + s.getpeername() + ", address: " + str(addr))
                     print(recvData)
+                    
+                    #Remove the disconnected peer
                     setPeerStatus(s.getpeername(), removed)
+                    
+                    #Close the socket
+                    s.shutdown(socket.SHUT_RDWR)
+                    s.close()
                 else:
                     #Diagnostics
                     alert('Incoming data from ' + str(addr))
@@ -613,12 +642,18 @@ if len(recvData) > 19:
 else:
     print("Announce response is too short")
 
+#Setup shutdown handlers so program gracefully closes
+#----------------------------------------------------
+#We use the signal module to ensure shutdown, since atexit doesn't execute when closed with signal/message
+signal.signal(signal.SIGTERM, shutdown)
 
 #Enter the main management loop
 #------------------------------
+routing = routingTools()
+
 try:
     runManager()
-except KeyboardInterrupt:
+finally:
     shutdown()
 
 
