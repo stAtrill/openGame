@@ -1,6 +1,10 @@
 #Protocol references:
 #http://www.rasterbar.com/products/libtorrent/udp_tracker_protocol.html
 #http://xbtt.sourceforge.net/udp_tracker_protocol.html
+#WMI references:
+#http://timgolden.me.uk/python/wmi/cookbook.html
+#http://timgolden.me.uk/python/wmi/index.html
+#http://stackoverflow.com/questions/7580834/script-to-change-ip-address-on-windows
 '''
 TODO/reference:
 -Use STUN to determine external IP: http://tools.ietf.org/html/rfc5389 , http://www.stunprotocol.org/
@@ -9,16 +13,22 @@ TODO/reference:
 -Detecting failed connections
 -Test for proper shutdown behavior
 -'with' statement when opening settings file in Initialize
+-Send address, even if unknown, also configure adapter
+-Handle tunnel-wide broadcasts
 '''
 #Peer management: Management of timeouts on failed connections, keep alive
 
-import socket, string, random, select, time, struct, math, urllib.request, signal
+import socket, string, random, select, time, struct, math, urllib.request, signal, binascii
 
+#These are all needed for the TunTapWin class
 import win32file
 import pywintypes
 import win32event
 import win32api
 import winreg as reg
+
+#These are for the routing manager class
+import wmi
 
 import queue, threading
 #import tkinter as tk Not needed until GUI
@@ -31,7 +41,7 @@ def Initialize():
     global peerList, connList, connID, dest, udpPort, tcpPort, s, notConnected, connecting, connected, removed, \
     verboseMode, incomingConnection, outgoingConnection, updatesPerSecond, mainSocket, readable, writable, \
     recvData, settings, settingsFormatString, myIP, myIPtimestamp, useTUNTAPAutosetup, useBackupBroadcastDectection, \
-    loopbackSocket, ethernetMTU, read, write
+    loopbackSocket, ethernetMTU, read, write, internalManagementIdentifier
     
     peerList = []
     connList = [[], []]
@@ -41,6 +51,7 @@ def Initialize():
     verboseMode = False
     settingsFormatString = "4sI"
     ethernetMTU = 1500
+    internalManagementIdentifier = "OpenGame"
     #connectionRetryCount = 0    #Never retry a connection, until the program properly handles non-blocking sockets with timeouts
 
     #This is a persistent identifier that we need to track
@@ -178,6 +189,7 @@ class tuntapWin:
             return False
     
     def __init__(self, autoSetup = False):
+    
         #These can be used, or not.
         self.myGUID = ""
         self.myInterface = 0
@@ -289,7 +301,24 @@ class tuntapWin:
             return self.readDataQueue.qsize()
         else:
             return False
-                
+    
+    #This function updates the IP address of the adapter
+    def setDeviceProperties(self, myIP):
+        if not self.myMACaddr:
+            print("Mac address not known, cannot set device yet")
+            return False
+        else:
+            a= wmi.WMI()
+            for interface in a.Win32_NetworkAdapterConfiguration(IPEnabled=1):
+                a = binascii.unhexlify(interface.MACAddress.replace(':', ''))
+                if a == self.myMACaddr:
+                    interface.EnableStatic(IPAddress=[myIP],SubnetMask=["255.0.0.0"])
+                    print("IP Address of interface successfully set.")
+                    break
+            else:
+                print("IP Address of interface was not successfully set.")
+        
+    
 #This function sets up a backup method for receiving broadcasts on win 7 and 8
 #Essentially, binds a raw socket to the loopback interface, and for some magical reason, broadcasts appear
 #Reference: https://github.com/dechamps/WinIPBroadcast/blob/master/WinIPBroadcast.c
@@ -362,7 +391,7 @@ def Announce():
     #Prepare payload
     a = 0x1.to_bytes(4, 'big') #action
     transID = random.randrange(65535).to_bytes(4, 'big') #TransID
-    iH = 'opnGameGroundContro7'.encode('ascii')
+    iH = 'opnGameGroundContr23'.encode('ascii')
     myID = ('openGame'+''.join(random.choice(string.ascii_letters + string.digits) for _ in range(12))).encode('ascii')
     d = 0x0.to_bytes(8, 'big')
     l = 0x987.to_bytes(8, 'big')
@@ -388,25 +417,31 @@ def indexAddresses(rawAddr):
         #a = ".".join([str(int.from_bytes([rawAddr[i]], 'big')), str(int.from_bytes([rawAddr[i+1]], 'big')), str(int.from_bytes([rawAddr[i+2]], 'big')), str(int.from_bytes([rawAddr[i+3]], 'big'))])
         a = socket.inet_ntoa(rawAddr[i:i+4])
         p = int.from_bytes(recvData[24:26], 'big')
-        peerList.append([a, p, notConnected, [0]])
+        
+        #Don't add an address to the list if it is ours
+        if a != settings[myIP]:
+            peerList.append([a, p, notConnected, [0, None]])
 
     #Diagnostics
-    alert("Peerlist: \n"+str(peerList))
+    print("Peerlist: \n"+str(peerList))
+    
+    #Attempt to update IP address (this is so that, if we are the first in the room, we auto-assign our own IP)
+    routing.updateMyAddr()
 
 #A function to set the status of a peer in the list.
 #Will add an address into the peerlist if it doesn't already exist.
-#Rewrite code with 'else' clause for search
-def setPeerStatus(addr, status, peerSock = 0):
+def setPeerStatus(addr, status, peerSock = None):
 
     #Brief search to see if the peer is currently in our list, adding it if not
+    pos = 0     #We initiate pos here to handle the case where the peerlist is empty
     for pos, (a, b, c, d) in enumerate(peerList):
         if (a, b) == addr:
-            alert("Peer " + str(addr) + " already exists in the peer list.", "_all")
+            alert("Peer " + str(addr) + " already exists in the peer list.")
             break
     else:
         if status != removed:
             #Add peer into the peerlist, tracking both the address and socket
-            peerList.append([addr[0], addr[1], status, [peerSock]])
+            peerList.append([addr[0], addr[1], status, [peerSock, None]])
             alert('Added to peerlist.', "_all")
             alert(peerSock)
         else:
@@ -422,10 +457,15 @@ def setPeerStatus(addr, status, peerSock = 0):
             a = 30 #Setting a new timeout
             
         elif status == connecting:
-            a = peerList[pos][3] = peerSock     #We store the peer's socket in the storage
+            #We store the peer's socket in the storage along with a placeholder for an internal IP address
+            a = [peerSock, None]
 
         else:
             a = peerList[pos][3]    #Preserves the existing storage
+            
+            #If we know our IP, tell them
+            routing.announceMyInternalIP(peerList[pos][3][0])
+        
             
         peerList[pos] = [peerList[pos][0], peerList[pos][1], status, a]
     
@@ -467,26 +507,6 @@ def peerConnection(incom, address = ""):
         connList[writable].append(peerSock)
         setPeerStatus(address, connecting, peerSock)
 
-#This function sends data to connected peers! Woohoo!
-def routeAndSend(dataToSend):
-    #Check first to see if the packet is a broadcast packet
-    #The position we read from changes depending on whether ethernet headers are stripped, so make sure
-    #setting is correct in the TUNTAP class
-    if dataToSend[16:20] == b'\xff\xff\xff\xff':
-        for peerSock in connList[readable]:
-            if peerSock != mainSocket and peerSock != loopbackSocket:
-                peerSock.sendall(dataToSend)
-                alert("Broadcast data sent to : " + str(peerSock.getpeername()), '_all')
-    else:
-        #Here we send data to a single peer
-        #Search the peerlist for the peer, then send
-        for peerSock in connList[readable]:
-            if peerSock != mainSocket and peerSock != loopbackSocket:
-                print(socket.inet_ntoa(dataToSend[16:20]), peerSock.getpeername()[0])
-                if peerSock.getpeername()[0] == dataToSend[16:20]:
-                    peerSock.sendall(dataToSend)
-                    alert("Sent data only to : " + str(peerSock.getpeername()), '_all')
-
 #These are placed all in one class for legibility, and to reduce function spam
 class routingTools:
     def __init__(self):
@@ -498,20 +518,96 @@ class routingTools:
         
         #Reserve the first address
         self.addrInUse[0] = True
-    
-    #Just an encapsulation for legibility
-    #Basically, returns the first address marked as in use
-    def getNewAddr(self):
-        a = self.addrInUse.index(False)
-        self.addrInUse[a] = True
-        return a
-
-    #Marks a previously reserved address as free
-    def freeAddr(self, addr):
-        self.addrInUse[addr] = False
-        return addr
         
-
+        #TODO: Setup the adapter, and determine the internal prefix
+        self.prefix = "11.0.0."
+        self.myAddr = len(peerList)     #This is an initial heuristic that will be overridden in some circumstances
+        self.isAddrSet = False
+        
+        #Diagnostics
+        print('My internal ip address initialized to :' + self.prefix + str(self.myAddr))
+        
+    
+    #Function to add a newly discovered address from a peer
+    def addDiscoveredAddr(self, peerSock, intrnlAddr):
+        #Yet another shallow copy of peerList, so we can modify peerList without messing up the loop
+        for i, a in enumerate(peerList[:]):
+            if a[3][0] == peerSock:
+                if peerList[i][3][1] != None:
+                    print('The peers internal IP has already been set. Re-setting...')
+                peerList[i][3][1] = intrnlAddr
+                print('Peer at index: ' + str(i) + " now has internal IP address: " + self.prefix + str(intrnlAddr))
+                self.updateMyAddr()
+                break
+                
+    #This function will update our internal address if there is enough information to do so
+    def updateMyAddr(self):
+        addr = 0
+        
+        if not self.isAddrSet:
+            #Reset the address in-use list
+            #Reserve the first address
+            self.addrInUse[0] = True
+            for i in range(1, 255):
+                self.addrInUse[i] = False
+            
+            for a in peerList:
+                #If any peers have not yet reported their address to us, we cannot set our IP
+                if a[3][1] == None:
+                    print("Not able to set internal IP yet.")
+                    return False
+                else:
+                    self.addrInUse[a[3][1]] = True
+                
+            else:
+                #Set our address to the first un-used address
+                self.myAddr = self.addrInUse.index(False)
+                self.isAddrSet = True
+                
+                #Update the adapter to match
+                myTap.setDeviceProperties(self.prefix + str(self.myAddr))
+                
+                print("Internal IP has now been set to :" + self.prefix + str(self.myAddr))
+                return True
+        else:
+            print('Address has already been set.')
+            return True
+    
+    #This function will tell a peer our IP address, when we know it
+    def announceMyInternalIP(self, peerSock):
+        if self.isAddrSet:
+            print("Announced internal IP to " + str(peerSock.getpeername()))
+            peerSock.sendall(bytes(internalManagementIdentifier + chr(self.myAddr), "utf-8"))
+        else:
+            return False
+    
+    #Takes incoming data and translates the network addresses
+    def NATincoming(self, data):
+        pass
+    
+    def NATandSend(self, dataToSend):
+        #Check first to see if the packet is a broadcast packet
+        #The position we read from changes depending on whether ethernet headers are stripped, so make sure
+        #setting is correct in the TUNTAP class
+        if dataToSend[16:20] == b'\xff\xff\xff\xff':
+            for peerSock in connList[readable]:
+                if peerSock != mainSocket and peerSock != loopbackSocket:
+                    peerSock.sendall(dataToSend)
+                    alert("Broadcast data sent to : " + str(peerSock.getpeername()), '_all')
+        else:
+            #Here we send data to a single peer
+            #Search the peerlist for the peer, then send
+            for pos, a in enumerate(peerList):
+                if a[2] == connected:
+                    #print(pos)
+                    #print(peerList)
+                    if a[3][1] != None:
+                        print("Comparing IPs to send to single peer: " + routing.prefix + str(a[3][1]))
+                        print(dataToSend[16:20])
+                        print(socket.inet_aton(routing.prefix + str(a[3][1])))
+                        if socket.inet_aton(routing.prefix + str(a[3][1])) == dataToSend[16:20]:
+                            a[3][0].sendall(dataToSend)
+                            alert("Sent data only to : " + str(a[3][0].getpeername()) + ", internal IP: " + str(routing.prefix + a[3][1]), '_all')
 
 
 #The main manager loop
@@ -563,7 +659,7 @@ def runManager():
                 alert('Loopback socket has detected a broadcast')
                 recvData = s.recv(ethernetMTU)
                 alert(str(recvData), '_all')
-                routeAndSend(recvData)
+                routing.NATandSend(recvData)
 
             else:
                 #Receive the data
@@ -590,8 +686,12 @@ def runManager():
                     alert('Incoming data from ' + str(addr))
                     alert(recvData)
                     
-                    #Send packets to the TAP adapter write queue
-                    myTap.writeDataQueue.put(recvData)
+                    if recvData[:len(internalManagementIdentifier)] == internalManagementIdentifier.encode():
+                        print('Internal management info received. Peer at ' + str(s.getpeername()) + " has internal IP :" + str(recvData[len(internalManagementIdentifier):]))
+                        routing.addDiscoveredAddr(s, ord(recvData[len(internalManagementIdentifier):].decode("utf-8")))
+                    else:
+                        #Send packets to the TAP adapter write queue
+                        myTap.writeDataQueue.put(recvData)
                 
 
         for s in wSock:
@@ -604,7 +704,7 @@ def runManager():
         #Check the adapter for data
         if myTap.deviceHasData():
             while myTap.deviceHasData():
-                routeAndSend(myTap.readDataQueue.get())
+                routing.NATandSend(myTap.readDataQueue.get())
 
         #This loop sleeps so that we will run the loop approx
         #uPS times per second
@@ -621,6 +721,7 @@ alert("Initialized. Verbose mode enabled.", "Initialized. Verbose mode disabled.
 myTap = tuntapWin(useTUNTAPAutosetup)
 alert("Tuntap device initialized, interface created.", "_all")
 
+routing = routingTools()
 
 #Connect to our tracker of choice, and announce if it succeeds
 if trackerConnect(dest):
@@ -628,6 +729,7 @@ if trackerConnect(dest):
     Announce()
 else:
     print('Connection to tracker failed')
+    sys.exit()
 
 
 
@@ -649,7 +751,6 @@ signal.signal(signal.SIGTERM, shutdown)
 
 #Enter the main management loop
 #------------------------------
-routing = routingTools()
 
 try:
     runManager()
