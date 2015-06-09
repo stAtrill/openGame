@@ -15,8 +15,10 @@ TODO/reference:
 -'with' statement when opening settings file in Initialize
 -Send address, even if unknown, also configure adapter
 -Handle tunnel-wide broadcasts
+-routingTools: routeAndSend can be rewritten to use a single loop
+-UDP tunnel: needs to use data port, not TCP negotiated port
 '''
-#Peer management: Management of timeouts on failed connections, keep alive
+#Peer management: Management of timeouts on failed connections
 
 import socket, string, random, select, time, struct, math, urllib.request, signal, binascii
 
@@ -38,21 +40,21 @@ import queue, threading
 
 #A function to initialize everything
 def Initialize():
-    global peerList, connList, connID, dest, udpPort, tcpPort, s, notConnected, connecting, connected, removed, \
+    global peerList, connList, connID, dest, udpPort, tcpPort, dataSocket, notConnected, connecting, connected, removed, \
     verboseMode, incomingConnection, outgoingConnection, updatesPerSecond, mainSocket, readable, writable, \
     recvData, settings, settingsFormatString, myIP, myIPtimestamp, useTUNTAPAutosetup, useBackupBroadcastDectection, \
-    loopbackSocket, ethernetMTU, read, write, internalManagementIdentifier
+    loopbackSocket, ethernetMTU, read, write, internalManagementIdentifier, myTcpUdpMode, UdpMode, TcpMode
     
     peerList = []
     connList = [[], []]
-    settings = [0, 0]       #[publicIP, timestamp]
+    settings = [0, 0, 0]       #[publicIP, timestamp, tunnelMode (TCP or UDP)]
 
     #Some settings
     verboseMode = False
-    settingsFormatString = "4sI"
+    settingsFormatString = "4sI?" #Something, something, boolean
     ethernetMTU = 1500
     internalManagementIdentifier = "OpenGame"
-    #connectionRetryCount = 0    #Never retry a connection, until the program properly handles non-blocking sockets with timeouts
+    #connectionRetryCount = 0    #Never retry a connection, until the program properly handles timeouts
 
     #This is a persistent identifier that we need to track
     connID = b""
@@ -69,6 +71,14 @@ def Initialize():
     read = 0
     write = 1
     
+    UdpMode = 0
+    TcpMode = 1
+    
+    #These are for the settings list
+    myIP = 0
+    myIPtimestamp = 1
+    myTcpUdpMode = 2
+    
     #Should the TUNTAP module set itself up?
     useTUNTAPAutosetup = True
     #This uses an alternate method for detecting broadcasts (on WIN 7/8) if the TAP device isn't picking them up
@@ -80,8 +90,6 @@ def Initialize():
     outgoingConnection = False
     
     staleIPtimeout = 21600      #6 hours
-    myIP = 0
-    myIPtimestamp = 1
 
     #Set the updates per second value
     updatesPerSecond = 15
@@ -92,24 +100,27 @@ def Initialize():
     #dest = ("tracker.leechers-paradise.org", 6969)
     #dest = ("exodus.desync.com", 6969)
     #dest = ("9.rarbg.me", 2710)
-
-    #Create UDP Socket
-    #Used for tracker announcing TODO: also as workaround if TCP fails 
-    udpPort = 5000
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.bind(("", udpPort))
-
+    
     #Create TCP server socket
     #Used to facilitate connection with peers
-    tcpPort = 5001
+    tcpPort = 5000
     mainSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     mainSocket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     mainSocket.bind(("", tcpPort))
     
     mainSocket.listen(5)
-
+    
     #Append the main socket to the readable subset of the connection list
     connList[readable].append(mainSocket)
+    
+    #Create UDP Socket
+    #Used for tracker announcing and UDP tunnel mode
+    udpPort = 5000
+    dataSocket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    dataSocket.bind(("", udpPort))
+    
+    #Append the data socket to the readable subset of the connection list if mode is UDP
+    if settings[myTcpUdpMode] == UdpMode: connList[readable].append(dataSocket)
 
 
     #Load the settings file, if it exists
@@ -124,7 +135,7 @@ def Initialize():
             print('Opened settings file')
             sttngFile = open('openGame settings', 'rb').read()
             #Format code: The IP address, and an unsigned int timestamp of when the IP was recorded
-            a , b = struct.unpack(settingsFormatString, sttngFile)
+            a, b, c = struct.unpack(settingsFormatString, sttngFile)
 
             #Update the IP address if the stored one is valid and current
             if int.from_bytes(a, 'big') > 0 and time.time() - b < staleIPtimeout:
@@ -229,7 +240,12 @@ class tuntapWin:
             alert("Tap GUID: " + self.myGUID)
             
             self.myInterface = self.createInterface()
-            self.setMediaConnectionStatus(True)
+            if (self.myInterface):
+                self.setMediaConnectionStatus(True) 
+            else:
+                alert("Failed to interface with TAP adapter. Exiting in 5 seconds.", "_all")
+                time.sleep(5)
+                sys.exit()
             
             self.dataThreads.append(threading.Thread(target=self.dataListenerThread, args=(self.readDataQueue,), daemon = True))
             self.dataThreads.append(threading.Thread(target=self.dataWriterThread, args=(self.writeDataQueue,), daemon = True))
@@ -341,7 +357,7 @@ def shutdown(*args):
     #Write all settings to file
     #---------------------------
     with open('openGame settings', 'wb') as sttngFile:
-        sttngFile.write(struct.pack(settingsFormatString, socket.inet_aton(settings[myIP]), settings[myIPtimestamp]))
+        sttngFile.write(struct.pack(settingsFormatString, socket.inet_aton(settings[myIP]), settings[myIPtimestamp], settings[myTcpUdpMode]))
 
     #Close all open sockets (skipping the server socket)
     #---------------------------------------------------
@@ -358,12 +374,12 @@ def trackerConnect(destAddress):
     data = 0x41727101980.to_bytes(8, 'big') + 0x0.to_bytes(4, 'big') + transID
 
     alert(data, "Connecting to tracker " + str(destAddress[0]) + " on port " + str(destAddress[1]) + ".")
-    s.sendto(data, destAddress)
+    dataSocket.sendto(data, destAddress)
 
     #Decode response
     #------------------------
     #TODO: make this select based, and give user option to wait or move on if response is slow
-    recvData, addr = s.recvfrom(ethernetMTU)
+    recvData, addr = dataSocket.recvfrom(ethernetMTU)
 
     #Perform integrity checks and
     #Return True if response checks out
@@ -391,7 +407,7 @@ def Announce():
     #Prepare payload
     a = 0x1.to_bytes(4, 'big') #action
     transID = random.randrange(65535).to_bytes(4, 'big') #TransID
-    iH = 'opnGameGroundContr23'.encode('ascii')
+    iH = 'opnGameGroundContr18'.encode('ascii')
     myID = ('openGame'+''.join(random.choice(string.ascii_letters + string.digits) for _ in range(12))).encode('ascii')
     d = 0x0.to_bytes(8, 'big')
     l = 0x987.to_bytes(8, 'big')
@@ -406,7 +422,7 @@ def Announce():
     #Diagnostics
     alert(payload)
     
-    s.sendto(payload, dest)
+    dataSocket.sendto(payload, dest)
     alert("Announced to tracker.", "_all")
 
 #A function to index returned addresses into the peerlist
@@ -424,9 +440,6 @@ def indexAddresses(rawAddr):
 
     #Diagnostics
     print("Peerlist: \n"+str(peerList))
-    
-    #Attempt to update IP address (this is so that, if we are the first in the room, we auto-assign our own IP)
-    routing.updateMyAddr()
 
 #A function to set the status of a peer in the list.
 #Will add an address into the peerlist if it doesn't already exist.
@@ -510,13 +523,12 @@ def peerConnection(incom, address = ""):
 #These are placed all in one class for legibility, and to reduce function spam
 class routingTools:
     def __init__(self):
-        #Create the in-use IP list (maximum 254 addresses, 0 will always be self)
-        #TODO: Evaluate if *.255 can be issued
+        #Create the in-use IP list (maximum 254 addresses, 0 will always be reserved for the pretend 'gateway', and 255 broadcast)
         self.addrInUse = []
         for i in range(255):
             self.addrInUse.append(False)
         
-        #Reserve the first address
+        #Reserve the first address (Since it cannot be used)
         self.addrInUse[0] = True
         
         #TODO: Setup the adapter, and determine the internal prefix
@@ -525,7 +537,8 @@ class routingTools:
         self.isAddrSet = False
         
         #Diagnostics
-        print('My internal ip address initialized to :' + self.prefix + str(self.myAddr))
+        print('Routing tools initialized. My internal ip address initialized to :' + self.prefix + str(self.myAddr))
+        self.updateMyAddr()
         
     
     #Function to add a newly discovered address from a peer
@@ -567,7 +580,7 @@ class routingTools:
                 #Update the adapter to match
                 myTap.setDeviceProperties(self.prefix + str(self.myAddr))
                 
-                print("Internal IP has now been set to :" + self.prefix + str(self.myAddr))
+                print("Internal IP has now been set to: " + self.prefix + str(self.myAddr))
                 return True
         else:
             print('Address has already been set.')
@@ -579,36 +592,41 @@ class routingTools:
             print("Announced internal IP to " + str(peerSock.getpeername()))
             peerSock.sendall(bytes(internalManagementIdentifier + chr(self.myAddr), "utf-8"))
         else:
-            return False
+            print("Announced tentative internal IP to " + str(peerSock.getpeername()))
+            peerSock.sendall(bytes(internalManagementIdentifier + chr(self.myAddr), "utf-8"))
     
-    #Takes incoming data and translates the network addresses
-    def NATincoming(self, data):
-        pass
-    
-    def NATandSend(self, dataToSend):
+    def routeAndSend(self, dataToSend):
         #Check first to see if the packet is a broadcast packet
         #The position we read from changes depending on whether ethernet headers are stripped, so make sure
         #setting is correct in the TUNTAP class
         if dataToSend[16:20] == b'\xff\xff\xff\xff':
-            for peerSock in connList[readable]:
-                if peerSock != mainSocket and peerSock != loopbackSocket:
-                    peerSock.sendall(dataToSend)
-                    alert("Broadcast data sent to : " + str(peerSock.getpeername()), '_all')
+            if settings[myTcpUdpMode] == TcpMode:
+                for peerSock in connList[readable]:
+                    if peerSock != mainSocket and peerSock != loopbackSocket and peerSock != dataSocket:
+                        peerSock.sendall(dataToSend)
+                        alert("Broadcast data sent to : " + str(peerSock.getpeername()), '_all')
+            else:
+                for addr, port, status, extra in peerList:
+                    if status == connected:
+                        dataSocket.sendto(dataToSend, (addr, udpPort))
+                        alert("UDP broadcast data sent to: (" + str(addr) + ", " + str(port) + ")", '_all')
         else:
             #Here we send data to a single peer
             #Search the peerlist for the peer, then send
             for pos, a in enumerate(peerList):
                 if a[2] == connected:
-                    #print(pos)
-                    #print(peerList)
-                    if a[3][1] != None:
-                        print("Comparing IPs to send to single peer: " + routing.prefix + str(a[3][1]))
-                        print(dataToSend[16:20])
-                        print(socket.inet_aton(routing.prefix + str(a[3][1])))
+                    if settings[myTcpUdpMode] == TcpMode:
+                        if a[3][1] != None:
+                            print("Comparing IPs to send to single peer: " + routing.prefix + str(a[3][1]))
+                            print(dataToSend[16:20])
+                            print(socket.inet_aton(routing.prefix + str(a[3][1])))
+                            if socket.inet_aton(routing.prefix + str(a[3][1])) == dataToSend[16:20]:
+                                a[3][0].sendall(dataToSend)
+                                alert("Sent data only to : " + str(a[3][0].getpeername()) + ", internal IP: " + str(routing.prefix + a[3][1]), '_all')
+                    else:
                         if socket.inet_aton(routing.prefix + str(a[3][1])) == dataToSend[16:20]:
-                            a[3][0].sendall(dataToSend)
-                            alert("Sent data only to : " + str(a[3][0].getpeername()) + ", internal IP: " + str(routing.prefix + a[3][1]), '_all')
-
+                            dataSocket.sendto(dataToSend, (a[0], a[1]))
+                            alert("Sent data only to : " + str(a[0]) + ", internal IP: " + str(routing.prefix + a[3][1]), '_all')
 
 #The main manager loop
 def runManager():
@@ -659,7 +677,22 @@ def runManager():
                 alert('Loopback socket has detected a broadcast')
                 recvData = s.recv(ethernetMTU)
                 alert(str(recvData), '_all')
-                routing.NATandSend(recvData)
+                routing.routeAndSend(recvData)
+            
+            #Handle data from the data socket (but only when in UDP mode)
+            elif s == dataSocket:
+                if settings[myTcpUdpMode] == TcpMode:
+                    s.recvfrom(ethernetMTU)     #Discard the data.
+                    print("Data discarded")
+                else:
+                    recvData, addr = s.recvfrom(ethernetMTU)
+                    
+                    #Diagnostics
+                    alert('Incoming UDP data from ' + str(addr), "_all")
+                    alert(recvData)
+                    
+                    #Send packets to the TAP adapter write queue
+                    myTap.writeDataQueue.put(recvData)
 
             else:
                 #Receive the data
@@ -668,18 +701,17 @@ def runManager():
                     recvData, addr = s.recvfrom(ethernetMTU)
                 except socket.error:
                     #Connection forcefully closed
-                    print('Connection from ' + str(addr) + ' has forcefully closed. Probable cause: crash')
+                    alert('Connection from ' + str(addr) + ' has forcefully closed. Probable cause: crash', "_all")
                     connList[readable].remove(s)
                     
                     #Diagnostics
-                    print("Peername: " + s.getpeername() + ", address: " + str(addr))
+                    print("Peername: " + str(s.getpeername()) + ", address: " + str(addr))
                     print(recvData)
                     
                     #Remove the disconnected peer
                     setPeerStatus(s.getpeername(), removed)
                     
                     #Close the socket
-                    s.shutdown(socket.SHUT_RDWR)
                     s.close()
                 else:
                     #Diagnostics
@@ -687,7 +719,7 @@ def runManager():
                     alert(recvData)
                     
                     if recvData[:len(internalManagementIdentifier)] == internalManagementIdentifier.encode():
-                        print('Internal management info received. Peer at ' + str(s.getpeername()) + " has internal IP :" + str(recvData[len(internalManagementIdentifier):]))
+                        alert('Internal management info received. Peer at ' + str(s.getpeername()) + " has internal IP :" + str(recvData[len(internalManagementIdentifier):]), '_all')
                         routing.addDiscoveredAddr(s, ord(recvData[len(internalManagementIdentifier):].decode("utf-8")))
                     else:
                         #Send packets to the TAP adapter write queue
@@ -704,7 +736,7 @@ def runManager():
         #Check the adapter for data
         if myTap.deviceHasData():
             while myTap.deviceHasData():
-                routing.NATandSend(myTap.readDataQueue.get())
+                routing.routeAndSend(myTap.readDataQueue.get())
 
         #This loop sleeps so that we will run the loop approx
         #uPS times per second
@@ -721,21 +753,19 @@ alert("Initialized. Verbose mode enabled.", "Initialized. Verbose mode disabled.
 myTap = tuntapWin(useTUNTAPAutosetup)
 alert("Tuntap device initialized, interface created.", "_all")
 
-routing = routingTools()
 
 #Connect to our tracker of choice, and announce if it succeeds
 if trackerConnect(dest):
     #Store connection ID and announce
     Announce()
 else:
-    print('Connection to tracker failed')
+    print('Connection to tracker failed. Autoclosing in 5 seconds')
+    time.sleep(5)
     sys.exit()
-
-
 
 #Decode announce response
 #------------------------
-recvData, addr = s.recvfrom(ethernetMTU)
+recvData, addr = dataSocket.recvfrom(ethernetMTU)
 alert("Announce response: " + str(recvData))
 if len(recvData) > 19:
     #TODO: check action, etc, blahblah
@@ -743,6 +773,7 @@ if len(recvData) > 19:
     indexAddresses(recvData[20:])
 else:
     print("Announce response is too short")
+routing = routingTools()
 
 #Setup shutdown handlers so program gracefully closes
 #----------------------------------------------------
