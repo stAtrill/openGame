@@ -1,22 +1,26 @@
 #Protocol references:
 #http://www.rasterbar.com/products/libtorrent/udp_tracker_protocol.html
 #http://xbtt.sourceforge.net/udp_tracker_protocol.html
+#
 #WMI references:
 #http://timgolden.me.uk/python/wmi/cookbook.html
 #http://timgolden.me.uk/python/wmi/index.html
 #http://stackoverflow.com/questions/7580834/script-to-change-ip-address-on-windows
+#
+#Helpful:
+#https://community.openvpn.net/openvpn/ticket/316
 '''
 TODO/reference:
 -Use STUN to determine external IP: http://tools.ietf.org/html/rfc5389 , http://www.stunprotocol.org/
--Handle disconnection situations
 -Use upnp to open ports, implement miniUPnP https://github.com/miniupnp/miniupnp/blob/master/miniupnpc/pymoduletest.py
 -Detecting failed connections
 -Test for proper shutdown behavior
--'with' statement when opening settings file in Initialize
 -Send address, even if unknown, also configure adapter
--Handle tunnel-wide broadcasts
--routingTools: routeAndSend can be rewritten to use a single loop
+-Test handling of tunnel-wide broadcasts
 -UDP tunnel: needs to use data port, not TCP negotiated port
+-Move routingTools init to after TunTap init, make routingTools upnp synchronous
+-Bug: Crash when announcing address to connecting peer
+-ARP: need to pass along 0806 ethertype
 '''
 #Peer management: Management of timeouts on failed connections
 
@@ -51,7 +55,7 @@ def Initialize():
 
     #Some settings
     verboseMode = False
-    settingsFormatString = "4sI?" #Something, something, boolean
+    settingsFormatString = "4sI?" #4 chars (1 byte apiece), unsigned integer (4 bytes), boolean (1 byte)
     ethernetMTU = 1500
     internalManagementIdentifier = "OpenGame"
     #connectionRetryCount = 0    #Never retry a connection, until the program properly handles timeouts
@@ -92,11 +96,11 @@ def Initialize():
     staleIPtimeout = 21600      #6 hours
 
     #Set the updates per second value
-    updatesPerSecond = 15
+    updatesPerSecond = 30
     
-    #dest = ("open.demonii.com", 1337)
+    dest = ("open.demonii.com", 1337)
     #backups
-    dest = ("tracker.coppersurfer.tk", 6969)
+    #dest = ("tracker.coppersurfer.tk", 6969)
     #dest = ("tracker.leechers-paradise.org", 6969)
     #dest = ("exodus.desync.com", 6969)
     #dest = ("9.rarbg.me", 2710)
@@ -204,7 +208,7 @@ class tuntapWin:
         #These can be used, or not.
         self.myGUID = ""
         self.myInterface = 0
-        self.trimEthnHeaders = True
+        self.trimEthnHeaders = False
         self.ethernetMTU = ethernetMTU
         self.myMACaddr = b""            #A workaround, as I haven't figured out how to get the return from the GET_MAC control code
         self.remoteMACaddr = b"\xc4\x15\x53\xb3\x04\x33"    #Basically, when injecting packets, they come from a completely arbitrary address.
@@ -295,17 +299,21 @@ class tuntapWin:
                 alert("MAC address auto-discovered: " + str(self.myMACaddr), '_all')
                     
             #Truncate to the actual data - only for IP Packets
-            if bytes(self.readResult[1][12:14]) == b"\x08\x00":
+            #This functionality has been hacked, this needs to be redone to work properly
+            if bytes(self.readResult[1][12:14]) == b"\x08\x00" or bytes(self.readResult[1][12:14]) == b"\x08\x06" :
                 self.dataLen = int.from_bytes(self.readResult[1][16:18], 'big')
                 resultsQueue.put(bytes(self.readResult[1][14*self.trimEthnHeaders:14+self.dataLen]))
             else:
-                alert('Non-ip packet was discarded. EtherType code: ' + str(bytes(self.readResult[1][12:14])))
+                alert('Non-IP/ARP packet was discarded. EtherType code: ' + str(bytes(self.readResult[1][12:14])))
     
     def dataWriterThread(self, toWriteQueue):
         while True:
             if not toWriteQueue.empty():
-                #Add Ethernet header back onto the packet
-                self.d = self.myMACaddr + self.remoteMACaddr + b"\x08\x00"  #Because, as of right now, this only carries ipv4 traffic
+                if self.trimEthnHeaders:
+                    #Add Ethernet header back onto the packet (since it was removed)
+                    self.d = self.myMACaddr + self.remoteMACaddr + b"\x08\x00"  #Because, as of right now, this only carries ipv4 traffic
+                else:
+                    self.d = b""
                 alert('Injecting packet on adapter')
                 win32file.WriteFile(self.myInterface, self.d + toWriteQueue.get(), self.overlapped[write])
                 win32event.WaitForSingleObject(self.overlapped[write].hEvent, win32event.INFINITE)
@@ -318,21 +326,26 @@ class tuntapWin:
         else:
             return False
     
-    #This function updates the IP address of the adapter
-    def setDeviceProperties(self, myIP):
+    #This function updates the IP address and mask of the adapter
+    def setDeviceProperties(self, myIP, myMask):
         if not self.myMACaddr:
             print("Mac address not known, cannot set device yet")
             return False
         else:
             a= wmi.WMI()
             for interface in a.Win32_NetworkAdapterConfiguration(IPEnabled=1):
-                a = binascii.unhexlify(interface.MACAddress.replace(':', ''))
-                if a == self.myMACaddr:
-                    interface.EnableStatic(IPAddress=[myIP],SubnetMask=["255.0.0.0"])
-                    print("IP Address of interface successfully set.")
-                    break
+                b = binascii.unhexlify(interface.MACAddress.replace(':', ''))
+                if b == self.myMACaddr:
+                    c = interface.EnableStatic(IPAddress=[myIP],SubnetMask=[myMask]) 
+                    if c[0] == 0:
+                        print("IP Address of interface successfully set.")
+                        return True
+                    else: 
+                        print("IP Address of interface was not successfully set: The operation failed with error number: " + str(c[0]))
+                        return False
             else:
-                print("IP Address of interface was not successfully set.")
+                print("IP Address of interface was not successfully set: could not find interface.")
+                return False
         
     
 #This function sets up a backup method for receiving broadcasts on win 7 and 8
@@ -362,8 +375,9 @@ def shutdown(*args):
     #Close all open sockets (skipping the server socket)
     #---------------------------------------------------
     for sock in connList[readable][1:] + connList[writable]:
-        sock.shutdown(socket.SHUT_RDWR)
-        sock.close()
+        if sock != dataSocket:
+            sock.shutdown(socket.SHUT_RDWR)
+            sock.close()
         
     alert('Shutdown complete. Exiting...', '_all')
 
@@ -407,7 +421,7 @@ def Announce():
     #Prepare payload
     a = 0x1.to_bytes(4, 'big') #action
     transID = random.randrange(65535).to_bytes(4, 'big') #TransID
-    iH = 'opnGameGroundContr18'.encode('ascii')
+    iH = 'opnGameGroundContro5'.encode('ascii')
     myID = ('openGame'+''.join(random.choice(string.ascii_letters + string.digits) for _ in range(12))).encode('ascii')
     d = 0x0.to_bytes(8, 'big')
     l = 0x987.to_bytes(8, 'big')
@@ -528,18 +542,37 @@ class routingTools:
         for i in range(255):
             self.addrInUse.append(False)
         
-        #Reserve the first address (Since it cannot be used)
+        #Reserve the first address (Since it cannot be used) and the second (since it pretends to be our gateway)
         self.addrInUse[0] = True
+        self.addrInUse[1] = True
         
         #TODO: Setup the adapter, and determine the internal prefix
         self.prefix = "11.0.0."
-        self.myAddr = len(peerList)     #This is an initial heuristic that will be overridden in some circumstances
+        self.netMask = "0111"           #This is used piecemeal; refers to which fields need to be checked as broadcast (for internal use only)
+        self.myAddr = len(peerList)+1     #This is an initial heuristic that will be overridden in some circumstances
         self.isAddrSet = False
+        
+        #Create the readable netmask (we use this version with functions outside of this class)
+        self.myMask = ""
+        for a in self.netMask:
+            if int(a) == False:
+                self.myMask += "255."
+            else:
+                self.myMask += "0."
+        else:
+            self.myMask = self.myMask[:-1]
         
         #Diagnostics
         print('Routing tools initialized. My internal ip address initialized to :' + self.prefix + str(self.myAddr))
         self.updateMyAddr()
         
+    #Function to determine whether or not an address is broadcast
+    def isBroadcast(self, addr):
+        for i in range(4):
+            if int(self.netMask[i]) == True and int(addr[i]) != 255:
+                return False        #The address is not a broadcast
+        else:
+            return True
     
     #Function to add a newly discovered address from a peer
     def addDiscoveredAddr(self, peerSock, intrnlAddr):
@@ -559,9 +592,10 @@ class routingTools:
         
         if not self.isAddrSet:
             #Reset the address in-use list
-            #Reserve the first address
+            #Reserve the first and second addresses
             self.addrInUse[0] = True
-            for i in range(1, 255):
+            self.addrInUse[1] = True
+            for i in range(2, 255):
                 self.addrInUse[i] = False
             
             for a in peerList:
@@ -578,7 +612,7 @@ class routingTools:
                 self.isAddrSet = True
                 
                 #Update the adapter to match
-                myTap.setDeviceProperties(self.prefix + str(self.myAddr))
+                myTap.setDeviceProperties(self.prefix + str(self.myAddr), self.myMask)
                 
                 print("Internal IP has now been set to: " + self.prefix + str(self.myAddr))
                 return True
@@ -596,37 +630,36 @@ class routingTools:
             peerSock.sendall(bytes(internalManagementIdentifier + chr(self.myAddr), "utf-8"))
     
     def routeAndSend(self, dataToSend):
-        #Check first to see if the packet is a broadcast packet
-        #The position we read from changes depending on whether ethernet headers are stripped, so make sure
-        #setting is correct in the TUNTAP class
-        if dataToSend[16:20] == b'\xff\xff\xff\xff':
-            if settings[myTcpUdpMode] == TcpMode:
-                for peerSock in connList[readable]:
-                    if peerSock != mainSocket and peerSock != loopbackSocket and peerSock != dataSocket:
-                        peerSock.sendall(dataToSend)
-                        alert("Broadcast data sent to : " + str(peerSock.getpeername()), '_all')
-            else:
-                for addr, port, status, extra in peerList:
-                    if status == connected:
-                        dataSocket.sendto(dataToSend, (addr, udpPort))
-                        alert("UDP broadcast data sent to: (" + str(addr) + ", " + str(port) + ")", '_all')
-        else:
-            #Here we send data to a single peer
-            #Search the peerlist for the peer, then send
-            for pos, a in enumerate(peerList):
-                if a[2] == connected:
+        #a temporary variable to avoid repeated calculation
+        startLoc = (not myTap.trimEthnHeaders)*14
+        for addr, port, status, extra in peerList:
+            if status == connected:
+                #Check first to see if the packet is a broadcast packet
+                #The position we read from changes depending on whether ethernet headers are stripped, so make sure
+                #setting is correct in the TUNTAP class
+                if self.isBroadcast(dataToSend[startLoc+16:startLoc+20]):
+                    #print(dataToSend[startLoc+16:startLoc+20])
                     if settings[myTcpUdpMode] == TcpMode:
-                        if a[3][1] != None:
-                            print("Comparing IPs to send to single peer: " + routing.prefix + str(a[3][1]))
-                            print(dataToSend[16:20])
-                            print(socket.inet_aton(routing.prefix + str(a[3][1])))
-                            if socket.inet_aton(routing.prefix + str(a[3][1])) == dataToSend[16:20]:
-                                a[3][0].sendall(dataToSend)
-                                alert("Sent data only to : " + str(a[3][0].getpeername()) + ", internal IP: " + str(routing.prefix + a[3][1]), '_all')
+                        extra[0].sendall(dataToSend)
+                        alert("Broadcast data sent to : " + str(extra[0].getpeername()), '_all')
                     else:
-                        if socket.inet_aton(routing.prefix + str(a[3][1])) == dataToSend[16:20]:
-                            dataSocket.sendto(dataToSend, (a[0], a[1]))
-                            alert("Sent data only to : " + str(a[0]) + ", internal IP: " + str(routing.prefix + a[3][1]), '_all')
+                        dataSocket.sendto(dataToSend, (addr, udpPort))      #TODO: Fix using our udp port as peer port
+                        alert("UDP broadcast data sent to: (" + str(addr) + ", " + str(port) + ")", '_all')
+                else:
+                    #Here we send data to a single peer
+                    #Search the peerlist for the peer, then send
+                    if extra[1] != None:
+                        alert("Comparing IPs to send to single peer: " + routing.prefix + str(extra[1]))
+                        alert(dataToSend[startLoc+16:startLoc+20])
+                        alert(socket.inet_aton(routing.prefix + str(extra[1])))
+                        if settings[myTcpUdpMode] == TcpMode:
+                                if socket.inet_aton(routing.prefix + str(extra[1])) == dataToSend[startLoc+16:startLoc+20]:
+                                    extra[0].sendall(dataToSend)
+                                    alert("Sent data only to : " + str(extra[0].getpeername()) + ", internal IP: " + str(routing.prefix + extra[1]), '_all')
+                        else:
+                            if socket.inet_aton(routing.prefix + str(extra[1])) == dataToSend[startLoc+16:startLoc+20]:
+                                dataSocket.sendto(dataToSend, (addr, udpPort))      #TODO: Fix using our udp port as peer port
+                                alert("Sent UDP data only to : (" + str(addr) + ", " + str(udpPort) + "), internal IP: " + routing.prefix + str(extra[1]), '_all')
 
 #The main manager loop
 def runManager():
@@ -785,6 +818,9 @@ signal.signal(signal.SIGTERM, shutdown)
 
 try:
     runManager()
+#So that no traceback is printed for a CTRL+C
+except KeyboardInterrupt:
+    pass
 finally:
     shutdown()
 
