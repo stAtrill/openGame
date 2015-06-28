@@ -14,13 +14,11 @@ TODO/reference:
 -Use STUN to determine external IP: http://tools.ietf.org/html/rfc5389 , http://www.stunprotocol.org/
 -Use upnp to open ports, implement miniUPnP https://github.com/miniupnp/miniupnp/blob/master/miniupnpc/pymoduletest.py
 -Detecting failed connections
--Test for proper shutdown behavior
 -Send address, even if unknown, also configure adapter
--Test handling of tunnel-wide broadcasts
 -UDP tunnel: needs to use data port, not TCP negotiated port
 -Move routingTools init to after TunTap init, make routingTools upnp synchronous
 -Bug: Crash when announcing address to connecting peer
--ARP: need to pass along 0806 ethertype
+-Debug adapter crash. Potentially useful resource: http://www.flounder.com/asynchexplorer.htm
 '''
 #Peer management: Management of timeouts on failed connections
 
@@ -96,7 +94,7 @@ def Initialize():
     staleIPtimeout = 21600      #6 hours
 
     #Set the updates per second value
-    updatesPerSecond = 30
+    updatesPerSecond = 100
     
     dest = ("open.demonii.com", 1337)
     #backups
@@ -289,8 +287,12 @@ class tuntapWin:
     #A function to constantly grab data from the tap device, perform some basic filtering, and enter the results in a queue
     def dataListenerThread(self, resultsQueue):
         while True:
-            self.readResult = win32file.ReadFile(self.myInterface, self.readBuffer, self.overlapped[read])
-            win32event.WaitForSingleObject(self.overlapped[read].hEvent, win32event.INFINITE)
+            try:
+                self.readResult = win32file.ReadFile(self.myInterface, self.readBuffer, self.overlapped[read])
+                win32event.WaitForSingleObject(self.overlapped[read].hEvent, win32event.INFINITE)
+            except:
+                print("Device malfunctioned during read operation. Attempting to continue...")
+                continue
 
             #MAC Address autodiscover
             #WORKAROUND: If our own MAC hasn't yet been discovered, auto-set it now
@@ -300,8 +302,12 @@ class tuntapWin:
                     
             #Truncate to the actual data - only for IP Packets
             #This functionality has been hacked, this needs to be redone to work properly
-            if bytes(self.readResult[1][12:14]) == b"\x08\x00" or bytes(self.readResult[1][12:14]) == b"\x08\x06" :
+            if bytes(self.readResult[1][12:14]) == b"\x08\x00" :
                 self.dataLen = int.from_bytes(self.readResult[1][16:18], 'big')
+                resultsQueue.put(bytes(self.readResult[1][14*self.trimEthnHeaders:14+self.dataLen]))
+            elif bytes(self.readResult[1][12:14]) == b"\x08\x06":
+                print("ARP packet detected on adapter")
+                self.dataLen = 28       #ARP on IPv4 are always 28 bytes long
                 resultsQueue.put(bytes(self.readResult[1][14*self.trimEthnHeaders:14+self.dataLen]))
             else:
                 alert('Non-IP/ARP packet was discarded. EtherType code: ' + str(bytes(self.readResult[1][12:14])))
@@ -340,7 +346,10 @@ class tuntapWin:
                     if c[0] == 0:
                         print("IP Address of interface successfully set.")
                         return True
-                    else: 
+                    elif c[0] < 0: 
+                        print("IP Address of interface was not successfully set: Administrator privileges are required to configure the interface.")
+                        return False
+                    else:
                         print("IP Address of interface was not successfully set: The operation failed with error number: " + str(c[0]))
                         return False
             else:
@@ -421,7 +430,7 @@ def Announce():
     #Prepare payload
     a = 0x1.to_bytes(4, 'big') #action
     transID = random.randrange(65535).to_bytes(4, 'big') #TransID
-    iH = 'opnGameGroundContro5'.encode('ascii')
+    iH = 'opnGameGroundContro2'.encode('ascii')
     myID = ('openGame'+''.join(random.choice(string.ascii_letters + string.digits) for _ in range(12))).encode('ascii')
     d = 0x0.to_bytes(8, 'big')
     l = 0x987.to_bytes(8, 'big')
@@ -630,15 +639,21 @@ class routingTools:
             peerSock.sendall(bytes(internalManagementIdentifier + chr(self.myAddr), "utf-8"))
     
     def routeAndSend(self, dataToSend):
-        #a temporary variable to avoid repeated calculation
-        startLoc = (not myTap.trimEthnHeaders)*14
+        #Calculate IPv4 address here to avoid repeated calculation inside the loop
+        destAddress = dataToSend[(not myTap.trimEthnHeaders)*14+16:(not myTap.trimEthnHeaders)*14+20]
+        
+        #Detect ARP packets and handle accordingly
+        if not myTap.trimEthnHeaders and dataToSend[12:14] == b"\x08\x06":
+            isArp = True
+        else:
+            isArp = False
+        
         for addr, port, status, extra in peerList:
             if status == connected:
                 #Check first to see if the packet is a broadcast packet
                 #The position we read from changes depending on whether ethernet headers are stripped, so make sure
                 #setting is correct in the TUNTAP class
-                if self.isBroadcast(dataToSend[startLoc+16:startLoc+20]):
-                    #print(dataToSend[startLoc+16:startLoc+20])
+                if self.isBroadcast(destAddress) or isArp:
                     if settings[myTcpUdpMode] == TcpMode:
                         extra[0].sendall(dataToSend)
                         alert("Broadcast data sent to : " + str(extra[0].getpeername()), '_all')
@@ -650,14 +665,14 @@ class routingTools:
                     #Search the peerlist for the peer, then send
                     if extra[1] != None:
                         alert("Comparing IPs to send to single peer: " + routing.prefix + str(extra[1]))
-                        alert(dataToSend[startLoc+16:startLoc+20])
+                        alert(destAddress)
                         alert(socket.inet_aton(routing.prefix + str(extra[1])))
                         if settings[myTcpUdpMode] == TcpMode:
-                                if socket.inet_aton(routing.prefix + str(extra[1])) == dataToSend[startLoc+16:startLoc+20]:
+                                if socket.inet_aton(routing.prefix + str(extra[1])) == destAddress:
                                     extra[0].sendall(dataToSend)
                                     alert("Sent data only to : " + str(extra[0].getpeername()) + ", internal IP: " + str(routing.prefix + extra[1]), '_all')
                         else:
-                            if socket.inet_aton(routing.prefix + str(extra[1])) == dataToSend[startLoc+16:startLoc+20]:
+                            if socket.inet_aton(routing.prefix + str(extra[1])) == destAddress:
                                 dataSocket.sendto(dataToSend, (addr, udpPort))      #TODO: Fix using our udp port as peer port
                                 alert("Sent UDP data only to : (" + str(addr) + ", " + str(udpPort) + "), internal IP: " + routing.prefix + str(extra[1]), '_all')
 
@@ -665,13 +680,13 @@ class routingTools:
 def runManager():
     #A variable to indicate when to stop
     goOn = True
+    deltaTime = 1/updatesPerSecond
 
     #Inform the user on program exit
     print('Connection manager is now running. \nPress CTRL + C to close this program at any time')
     #TODO: Make the above actually work
 
     while goOn:
-        deltaTime = 1/updatesPerSecond
 
         #Manage peer list
         #---------------------------------
