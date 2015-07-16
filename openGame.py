@@ -9,18 +9,19 @@
 #
 #Helpful:
 #https://community.openvpn.net/openvpn/ticket/316
+#
+#Potentially useful resource: http://www.flounder.com/asynchexplorer.htm
 '''
 TODO/reference:
 -Use STUN to determine external IP: http://tools.ietf.org/html/rfc5389 , http://www.stunprotocol.org/
 -Use upnp to open ports, implement miniUPnP https://github.com/miniupnp/miniupnp/blob/master/miniupnpc/pymoduletest.py
--Detecting failed connections
 -Send address, even if unknown, also configure adapter
 -UDP tunnel: needs to use data port, not TCP negotiated port
 -Move routingTools init to after TunTap init, make routingTools upnp synchronous
 -Bug: Crash when announcing address to connecting peer
--Debug adapter crash. Potentially useful resource: http://www.flounder.com/asynchexplorer.htm
+-Bug: WMI does not actually set adapter metric, but returns 'operation completed' (Apparently windows 7 bug)
+-Use signals (instead of a timeout) for minimum latency in transmission, and preserving data order
 '''
-#Peer management: Management of timeouts on failed connections
 
 import socket, string, random, select, time, struct, math, urllib.request, signal, binascii
 
@@ -45,7 +46,7 @@ def Initialize():
     global peerList, connList, connID, dest, udpPort, tcpPort, dataSocket, notConnected, connecting, connected, removed, \
     verboseMode, incomingConnection, outgoingConnection, updatesPerSecond, mainSocket, readable, writable, \
     recvData, settings, settingsFormatString, myIP, myIPtimestamp, useTUNTAPAutosetup, useBackupBroadcastDectection, \
-    loopbackSocket, ethernetMTU, read, write, internalManagementIdentifier, myTcpUdpMode, UdpMode, TcpMode
+    loopbackSocket, ethernetMTU, read, write, internalManagementIdentifier, myTcpUdpMode, UdpMode, TcpMode, connectingTimeout
     
     peerList = []
     connList = [[], []]
@@ -53,10 +54,11 @@ def Initialize():
 
     #Some settings
     verboseMode = False
-    settingsFormatString = "4sI?" #4 chars (1 byte apiece), unsigned integer (4 bytes), boolean (1 byte)
-    ethernetMTU = 1500
+    settingsFormatString = "4sI?"   #4 chars (1 byte apiece), unsigned integer (4 bytes), boolean (1 byte)
+    ethernetMTU = 4096
     internalManagementIdentifier = "OpenGame"
-    #connectionRetryCount = 0    #Never retry a connection, until the program properly handles timeouts
+    connectingTimeout = 12          #Wait 12 seconds for a connection to complete
+    #connectionRetryCount = 0       #Never retry a connection, until the program properly handles timeouts
 
     #This is a persistent identifier that we need to track
     connID = b""
@@ -290,6 +292,9 @@ class tuntapWin:
             try:
                 self.readResult = win32file.ReadFile(self.myInterface, self.readBuffer, self.overlapped[read])
                 win32event.WaitForSingleObject(self.overlapped[read].hEvent, win32event.INFINITE)
+                
+                #We increment this to allow the device to properly read data in the event that there is more than one packet in waiting to be read
+                self.overlapped[read].Offset += len(self.readResult[1])
             except:
                 print("Device malfunctioned during read operation. Attempting to continue...")
                 continue
@@ -306,7 +311,6 @@ class tuntapWin:
                 self.dataLen = int.from_bytes(self.readResult[1][16:18], 'big')
                 resultsQueue.put(bytes(self.readResult[1][14*self.trimEthnHeaders:14+self.dataLen]))
             elif bytes(self.readResult[1][12:14]) == b"\x08\x06":
-                print("ARP packet detected on adapter")
                 self.dataLen = 28       #ARP on IPv4 are always 28 bytes long
                 resultsQueue.put(bytes(self.readResult[1][14*self.trimEthnHeaders:14+self.dataLen]))
             else:
@@ -317,12 +321,14 @@ class tuntapWin:
             if not toWriteQueue.empty():
                 if self.trimEthnHeaders:
                     #Add Ethernet header back onto the packet (since it was removed)
-                    self.d = self.myMACaddr + self.remoteMACaddr + b"\x08\x00"  #Because, as of right now, this only carries ipv4 traffic
+                    self.writeData = self.myMACaddr + self.remoteMACaddr + b"\x08\x00" + toWriteQueue.get()
                 else:
-                    self.d = b""
+                    self.writeData = toWriteQueue.get()
                 alert('Injecting packet on adapter')
-                win32file.WriteFile(self.myInterface, self.d + toWriteQueue.get(), self.overlapped[write])
+                win32file.WriteFile(self.myInterface, self.writeData, self.overlapped[write])
                 win32event.WaitForSingleObject(self.overlapped[write].hEvent, win32event.INFINITE)
+                #We increment this to allow the device to properly read data in the event that there is more than one packet in waiting to be read
+                self.overlapped[write].Offset += len(self.writeData)
             else:
                 time.sleep(0.05)
     
@@ -332,7 +338,8 @@ class tuntapWin:
         else:
             return False
     
-    #This function updates the IP address and mask of the adapter
+    #This function updates the IP address and mask of the adapter, and additionally
+    #checks to make sure the interface metric is set to 1
     def setDeviceProperties(self, myIP, myMask):
         if not self.myMACaddr:
             print("Mac address not known, cannot set device yet")
@@ -342,9 +349,20 @@ class tuntapWin:
             for interface in a.Win32_NetworkAdapterConfiguration(IPEnabled=1):
                 b = binascii.unhexlify(interface.MACAddress.replace(':', ''))
                 if b == self.myMACaddr:
-                    c = interface.EnableStatic(IPAddress=[myIP],SubnetMask=[myMask]) 
+                    c = interface.EnableStatic(IPAddress=[myIP],SubnetMask=[myMask])
+                    
+                    #Check if address was successfully set
                     if c[0] == 0:
                         print("IP Address of interface successfully set.")
+                        
+                        #Update the connection metric if it isn't 1 and setting address was successful
+                        if interface.IPConnectionMetric != 1:
+                            oldMetric = interface.IPConnectionMetric
+                            e = interface.SetIPConnectionMetric(1)
+                            if e[0] == 0:
+                                print("Interface metric was updated. Old metric was " + str(oldMetric) + ".")
+                            else:
+                                print("Failed while attempting to update interface metric.")
                         return True
                     elif c[0] < 0: 
                         print("IP Address of interface was not successfully set: Administrator privileges are required to configure the interface.")
@@ -430,7 +448,7 @@ def Announce():
     #Prepare payload
     a = 0x1.to_bytes(4, 'big') #action
     transID = random.randrange(65535).to_bytes(4, 'big') #TransID
-    iH = 'opnGameGroundContro2'.encode('ascii')
+    iH = 'opnGameGroundContro1'.encode('ascii')
     myID = ('openGame'+''.join(random.choice(string.ascii_letters + string.digits) for _ in range(12))).encode('ascii')
     d = 0x0.to_bytes(8, 'big')
     l = 0x987.to_bytes(8, 'big')
@@ -460,7 +478,10 @@ def indexAddresses(rawAddr):
         #Don't add an address to the list if it is ours
         if a != settings[myIP]:
             peerList.append([a, p, notConnected, [0, None]])
-
+    
+    #Test appendage
+    peerList.append(["2.3.8.5", 3000, notConnected, [0, None]])
+    
     #Diagnostics
     print("Peerlist: \n"+str(peerList))
 
@@ -486,15 +507,16 @@ def setPeerStatus(addr, status, peerSock = None):
         
     #Edit the peer's status
     if status == removed:
-        peerList.pop(pos)   #Remove the position from the list
+        peerList.pop(pos)           #Remove the position from the list
+        routing.updateMyAddr()      #Check addresses after a peer removal
         
     else:
         if status == notConnected:
             a = 30 #Setting a new timeout
             
         elif status == connecting:
-            #We store the peer's socket in the storage along with a placeholder for an internal IP address
-            a = [peerSock, None]
+            #We store the peer's socket in the storage along with a placeholder for an internal IP address, and the time we began connecting
+            a = [peerSock, None, math.floor(time.time())]
 
         else:
             a = peerList[pos][3]    #Preserves the existing storage
@@ -507,13 +529,13 @@ def setPeerStatus(addr, status, peerSock = None):
     
     #Print diagnostic text
     if status == notConnected:
-        alert("Peer at " + str(addr) + " set to not connected.", "_all")
+        alert("Peer at " + str(addr) + " set to not connected.")
     elif status == connecting:
         alert("Peer at " + str(addr) + " set to connecting.", "_all")
     elif status == connected:
         alert("Peer at " + str(addr) + " set to connected.", "_all")
     elif status == removed:
-        alert("Peer at " + str(addr) + " was removed from the peer list.", "_all")
+        alert("Peer at " + str(addr) + " was removed from the peer list.")
 
 #A potentially pointless function to connect to peers
 def peerConnection(incom, address = ""):
@@ -692,7 +714,7 @@ def runManager():
         #---------------------------------
         #Here, we will loop over all peers, updating and connecting, etc
         #We loop over a shallow copy, because (insert valid reason) -> we may modify the list inside of this loop
-        for i, (a, b, connStatus, connStorage) in enumerate(peerList[:]):
+        for i, (a, p, connStatus, connStorage) in enumerate(peerList[:]):
             #Handle all unconnected peers
             #Unconnected peer storage is as follows:
             #0 : Reconnect timeout
@@ -705,11 +727,24 @@ def runManager():
                     
                     if t < 0:
                         #Reconnect when timeout below zero
-                        peerConnection(outgoingConnection, (a, b))
+                        peerConnection(outgoingConnection, (a, p))
 
                     else:
                         #Decrease the reconnect timer
-                        peerList[i] = [a, b, connStatus, [t-deltaTime]]
+                        peerList[i] = [a, p, connStatus, [t-deltaTime]]
+                        
+                elif connStatus == connecting:
+                    if time.time() - connStorage[2] > connectingTimeout:
+                        #Connection forcefully closed
+                        alert('Attempted connection to ' + str(connStorage[0].getpeername()) + ' has timed out. Peer removed from list.', "_all")
+                        connList[writable].remove(connStorage[0])
+                        
+                        #Remove the disconnected peer
+                        setPeerStatus(connStorage[0].getpeername(), removed)
+                        
+                        #Close the socket
+                        connStorage[0].close()
+                        
 
         #Manage all sockets
         #---------------------------------
@@ -753,8 +788,8 @@ def runManager():
                     connList[readable].remove(s)
                     
                     #Diagnostics
-                    print("Peername: " + str(s.getpeername()) + ", address: " + str(addr))
-                    print(recvData)
+                    alert("Peername: " + str(s.getpeername()) + ", address: " + str(addr))
+                    alert(recvData)
                     
                     #Remove the disconnected peer
                     setPeerStatus(s.getpeername(), removed)
