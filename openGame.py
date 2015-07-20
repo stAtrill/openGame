@@ -16,14 +16,19 @@ TODO/reference:
 -Use STUN to determine external IP: http://tools.ietf.org/html/rfc5389 , http://www.stunprotocol.org/
 -Use upnp to open ports, implement miniUPnP https://github.com/miniupnp/miniupnp/blob/master/miniupnpc/pymoduletest.py
 -Send address, even if unknown, also configure adapter
+-When final address determined, broadcast to network
 -UDP tunnel: needs to use data port, not TCP negotiated port
 -Move routingTools init to after TunTap init, make routingTools upnp synchronous
 -Bug: Crash when announcing address to connecting peer
 -Bug: WMI does not actually set adapter metric, but returns 'operation completed' (Apparently windows 7 bug)
--Use signals (instead of a timeout) for minimum latency in transmission, and preserving data order
+-Reannounce to trackers
+-Build as 64 bit and 32 bit exe
+-Opengame needs to request Admin privileges if it encounters privilege-related errors
+-Opengame needs to create it's own windows firewall rules http://www.shafqatahmed.com/2008/01/controlling-win.html
+-Rewrite code to be thread safe
 '''
 
-import socket, string, random, select, time, struct, math, urllib.request, signal, binascii
+import socket, string, random, select, time, struct, math, urllib.request, signal, binascii, os
 
 #These are all needed for the TunTapWin class
 import win32file
@@ -43,21 +48,23 @@ import queue, threading
 
 #A function to initialize everything
 def Initialize():
-    global peerList, connList, connID, dest, udpPort, tcpPort, dataSocket, notConnected, connecting, connected, removed, \
-    verboseMode, incomingConnection, outgoingConnection, updatesPerSecond, mainSocket, readable, writable, \
-    recvData, settings, settingsFormatString, myIP, myIPtimestamp, useTUNTAPAutosetup, useBackupBroadcastDectection, \
-    loopbackSocket, ethernetMTU, read, write, internalManagementIdentifier, myTcpUdpMode, UdpMode, TcpMode, connectingTimeout
+    global peerList, connList, connID, dest, udpPort, tcpPort, dataSocket, notConnected, connecting, connected, removed, add, remove,\
+    verboseMode, incomingConnection, outgoingConnection, updatesPerSecond, mainSocket, signalSocket, sigSockAddr, socketManagerThread, readable, writable, \
+    recvData, settings, settingsFormatString, myIP, myIPtimestamp, myTrackerData, useTUNTAPAutosetup, useBackupBroadcastDectection, \
+    loopbackSocket, ethernetMTU, read, write, internalManagementIdentifier, myTcpUdpMode, UdpMode, TcpMode, connectingTimeout, mainTaskQueue, \
+    adapterReadCreator, socketManagerCreator
     
     peerList = []
     connList = [[], []]
-    settings = [0, 0, 0]       #[publicIP, timestamp, tunnelMode (TCP or UDP)]
+    settings = [0, 0, 0, ["", 0]]       #[publicIP, timestamp, tunnelMode (TCP or UDP), Trackerdata[Address, reannounce]]
+    mainTaskQueue = queue.Queue()
 
     #Some settings
     verboseMode = False
-    settingsFormatString = "4sI?"   #4 chars (1 byte apiece), unsigned integer (4 bytes), boolean (1 byte)
+    settingsFormatString = "4sI?"   #4 chars (1 byte apiece), unsigned int (4 bytes), boolean (1 byte)
     ethernetMTU = 4096
     internalManagementIdentifier = "OpenGame"
-    connectingTimeout = 12          #Wait 12 seconds for a connection to complete
+    connectingTimeout = 15          #Wait x seconds for a connection to complete
     #connectionRetryCount = 0       #Never retry a connection, until the program properly handles timeouts
 
     #This is a persistent identifier that we need to track
@@ -69,8 +76,14 @@ def Initialize():
     connected = 2
     removed = 3
     
+    add = 0
+    remove = 1
+    
     readable = 0
     writable = 1
+    
+    socketManagerCreator = 0
+    adapterReadCreator = 1
     
     read = 0
     write = 1
@@ -82,11 +95,14 @@ def Initialize():
     myIP = 0
     myIPtimestamp = 1
     myTcpUdpMode = 2
+    myTrackerData = 3
     
     #Should the TUNTAP module set itself up?
     useTUNTAPAutosetup = True
+    
     #This uses an alternate method for detecting broadcasts (on WIN 7/8) if the TAP device isn't picking them up
     #If the device is picking them up, it shouldn't be used or every broadcast will be dealt with twice
+    #NOTE: this has been broken anyway in the socket manager. Will need to fix if functionality desired.
     useBackupBroadcastDectection = False
     loopbackSocket = 0
     
@@ -98,12 +114,13 @@ def Initialize():
     #Set the updates per second value
     updatesPerSecond = 100
     
-    dest = ("open.demonii.com", 1337)
+    #dest = ("open.demonii.com", 1337)
     #backups
-    #dest = ("tracker.coppersurfer.tk", 6969)
+    dest = ("tracker.coppersurfer.tk", 6969)
     #dest = ("tracker.leechers-paradise.org", 6969)
     #dest = ("exodus.desync.com", 6969)
     #dest = ("9.rarbg.me", 2710)
+    
     
     #Create TCP server socket
     #Used to facilitate connection with peers
@@ -116,6 +133,17 @@ def Initialize():
     
     #Append the main socket to the readable subset of the connection list
     connList[readable].append(mainSocket)
+    
+    
+    #Create the socket manager signalling socket
+    #Most openGame comms are via queues, but the socket manager waits with select(), so a socket is necessary
+    sigSockAddr = ("127.0.0.1", random.randint(2000, 20000))
+    socketManagerThread = -1
+    signalSocket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    signalSocket.bind(sigSockAddr)
+
+    #Append the main socket to the readable subset of the connection list
+    connList[readable].append(signalSocket)
     
     #Create UDP Socket
     #Used for tracker announcing and UDP tunnel mode
@@ -136,18 +164,20 @@ def Initialize():
     except FileExistsError:
         try:
             #Load the settings file
-            print('Opened settings file')
             sttngFile = open('openGame settings', 'rb').read()
+            
             #Format code: The IP address, and an unsigned int timestamp of when the IP was recorded
-            a, b, c = struct.unpack(settingsFormatString, sttngFile)
+            a, settings[myIPtimestamp], c = struct.unpack(settingsFormatString, sttngFile)
 
             #Update the IP address if the stored one is valid and current
-            if int.from_bytes(a, 'big') > 0 and time.time() - b < staleIPtimeout:
-                alert("Public IP restored from saved values.", "_all")
-                alert("Old IP address is " + str(math.floor(time.time() - b)) + " seconds old.")
+            if settings[myIPtimestamp] > 0 and time.time() - settings[myIPtimestamp] < staleIPtimeout:
                 settings[myIP] = socket.inet_ntoa(a)
+                alert("Public IP restored from saved values: " + str(settings[myIP]), "_all")
+                alert("Old IP address is " + str(math.floor(time.time() - settings[myIPtimestamp])) + " seconds old.")
         except:
-            pass    #The unpacking failed for some reason, or the file was otherwise invalid. Oh well.
+            print('Failed opening settings file.')
+            #TODO: delete the bad file, start over.
+            #The unpacking failed for some reason, or the file was otherwise invalid. Oh well.
         
 
     #Determine our public IP address so we recognize ourselves in an IP list
@@ -160,7 +190,7 @@ def Initialize():
         except:
             settings[myIP] = input("The online IP service failed to respond, please manually enter your public IP.\n")
             settings[myIPtimestamp] = math.floor(time.time())
-        alert(settings[myIP])
+        alert('Public IP discovered from online service: ' + settings[myIP], '_all')
 
 #This class encapsulates the TUNTAP object (mainly so I can collapse it and not have to look at this cryptic eyesore)
 #Even though there were some examples online, they only provided partial functionality, and were exceedingly cryptic
@@ -216,6 +246,10 @@ class tuntapWin:
         self.writeDataQueue = queue.Queue()
         self.dataThreads = []
         
+        #Constants
+        self.readOperation = 1
+        self.writeOperation = 2
+        
         #Set up two overlapped structure for async operation, one for reading, the other for writing
         self.overlapped = []
         for i in range(2):
@@ -241,6 +275,13 @@ class tuntapWin:
         #Whether the object should attempt to initialize itself
         if autoSetup:
             self.myGUID = self.getDeviceGUID()
+            
+            #Force close if no adapter was found
+            if not self.myGUID:
+                alert("Fatal error: could not locate tap adapter. (Is the adapter properly installed?) \nAutoclosing in 5 seconds.", "_all")
+                time.sleep(5)
+                sys.exit()
+            
             alert("Tap GUID: " + self.myGUID)
             
             self.myInterface = self.createInterface()
@@ -251,12 +292,12 @@ class tuntapWin:
                 time.sleep(5)
                 sys.exit()
             
-            self.dataThreads.append(threading.Thread(target=self.dataListenerThread, args=(self.readDataQueue,), daemon = True))
+            self.dataThreads.append(threading.Thread(target=self.dataListenerThread, args=(self.readDataQueue,mainTaskQueue,), daemon = True))
             self.dataThreads.append(threading.Thread(target=self.dataWriterThread, args=(self.writeDataQueue,), daemon = True))
             self.dataThreads[0].start()
-            alert('Data listener thread started as daemon.', '_all')
+            alert('Data listener thread started as daemon.')
             self.dataThreads[1].start()
-            alert('Data injector thread started as daemon.', '_all')
+            alert('Data injector thread started as daemon.')
             
     
     #A function to make sure we close our handle and reset media status
@@ -287,14 +328,18 @@ class tuntapWin:
                 return False
     
     #A function to constantly grab data from the tap device, perform some basic filtering, and enter the results in a queue
-    def dataListenerThread(self, resultsQueue):
+    #This function is no longer portable as-is, references to the main queue would need to be removed
+    def dataListenerThread(self, resultsQueue, mainTaskQueue):
+        #Create local variable class
+        local = threading.local()
+        
         while True:
             try:
-                self.readResult = win32file.ReadFile(self.myInterface, self.readBuffer, self.overlapped[read])
+                local.readResult = win32file.ReadFile(self.myInterface, self.readBuffer, self.overlapped[read])
                 win32event.WaitForSingleObject(self.overlapped[read].hEvent, win32event.INFINITE)
                 
                 #We increment this to allow the device to properly read data in the event that there is more than one packet in waiting to be read
-                self.overlapped[read].Offset += len(self.readResult[1])
+                self.overlapped[read].Offset += len(local.readResult[1])
             except:
                 print("Device malfunctioned during read operation. Attempting to continue...")
                 continue
@@ -302,36 +347,43 @@ class tuntapWin:
             #MAC Address autodiscover
             #WORKAROUND: If our own MAC hasn't yet been discovered, auto-set it now
             if not self.myMACaddr:
-                self.myMACaddr = bytes(self.readResult[1][6:12])
+                self.myMACaddr = bytes(local.readResult[1][6:12])
                 alert("MAC address auto-discovered: " + str(self.myMACaddr), '_all')
                     
             #Truncate to the actual data - only for IP Packets
-            #This functionality has been hacked, this needs to be redone to work properly
-            if bytes(self.readResult[1][12:14]) == b"\x08\x00" :
-                self.dataLen = int.from_bytes(self.readResult[1][16:18], 'big')
-                resultsQueue.put(bytes(self.readResult[1][14*self.trimEthnHeaders:14+self.dataLen]))
-            elif bytes(self.readResult[1][12:14]) == b"\x08\x06":
-                self.dataLen = 28       #ARP on IPv4 are always 28 bytes long
-                resultsQueue.put(bytes(self.readResult[1][14*self.trimEthnHeaders:14+self.dataLen]))
+            #TODO: This functionality has been hacked, this needs to be redone to work properly
+            if bytes(local.readResult[1][12:14]) == b"\x08\x00" :
+                local.dataLen = int.from_bytes(local.readResult[1][16:18], 'big')
+                resultsQueue.put(bytes(local.readResult[1][14*self.trimEthnHeaders:14+local.dataLen]))
+                mainTaskQueue.put([adapterReadCreator, None])
+                       
+            elif bytes(local.readResult[1][12:14]) == b"\x08\x06":
+                local.dataLen = 28       #ARP on IPv4 are always 28 bytes long
+                resultsQueue.put(bytes(local.readResult[1][14*self.trimEthnHeaders:14+local.dataLen]))
+                mainTaskQueue.put([adapterReadCreator, None])
             else:
-                alert('Non-IP/ARP packet was discarded. EtherType code: ' + str(bytes(self.readResult[1][12:14])))
+                alert('Non-IP/ARP packet was discarded. EtherType code: ' + str(bytes(local.readResult[1][12:14])))
     
     def dataWriterThread(self, toWriteQueue):
-        while True:
-            if not toWriteQueue.empty():
-                if self.trimEthnHeaders:
-                    #Add Ethernet header back onto the packet (since it was removed)
-                    self.writeData = self.myMACaddr + self.remoteMACaddr + b"\x08\x00" + toWriteQueue.get()
-                else:
-                    self.writeData = toWriteQueue.get()
-                alert('Injecting packet on adapter')
-                win32file.WriteFile(self.myInterface, self.writeData, self.overlapped[write])
-                win32event.WaitForSingleObject(self.overlapped[write].hEvent, win32event.INFINITE)
-                #We increment this to allow the device to properly read data in the event that there is more than one packet in waiting to be read
-                self.overlapped[write].Offset += len(self.writeData)
-            else:
-                time.sleep(0.05)
+        #Create local variable class
+        local = threading.local()
     
+        while True:
+            #Block and wait for data
+            if self.trimEthnHeaders:
+                #Add Ethernet header back onto the packet (since it was removed)
+                local.writeData = self.myMACaddr + self.remoteMACaddr + b"\x08\x00" + toWriteQueue.get(block=True)
+            else:
+                local.writeData = toWriteQueue.get(block=True)
+            
+            alert('Injecting packet on adapter')
+            win32file.WriteFile(self.myInterface, local.writeData, self.overlapped[write])
+            win32event.WaitForSingleObject(self.overlapped[write].hEvent, win32event.INFINITE)
+            
+            #We increment this because everyone else does (real reason not known)
+            #self.overlapped[write].Offset += len(self.writeData)
+            pass
+ 
     def deviceHasData(self):
         if not self.readDataQueue.empty():
             return self.readDataQueue.qsize()
@@ -398,11 +450,13 @@ def shutdown(*args):
     #---------------------------
     with open('openGame settings', 'wb') as sttngFile:
         sttngFile.write(struct.pack(settingsFormatString, socket.inet_aton(settings[myIP]), settings[myIPtimestamp], settings[myTcpUdpMode]))
+        sttngFile.flush()
+        os.fsync(sttngFile.fileno())
 
     #Close all open sockets (skipping the server socket)
     #---------------------------------------------------
     for sock in connList[readable][1:] + connList[writable]:
-        if sock != dataSocket:
+        if sock != dataSocket and sock != signalSocket:
             sock.shutdown(socket.SHUT_RDWR)
             sock.close()
         
@@ -448,7 +502,7 @@ def Announce():
     #Prepare payload
     a = 0x1.to_bytes(4, 'big') #action
     transID = random.randrange(65535).to_bytes(4, 'big') #TransID
-    iH = 'opnGameGroundContro1'.encode('ascii')
+    iH = 'opnGameGroundContro2'.encode('ascii')
     myID = ('openGame'+''.join(random.choice(string.ascii_letters + string.digits) for _ in range(12))).encode('ascii')
     d = 0x0.to_bytes(8, 'big')
     l = 0x987.to_bytes(8, 'big')
@@ -479,8 +533,6 @@ def indexAddresses(rawAddr):
         if a != settings[myIP]:
             peerList.append([a, p, notConnected, [0, None]])
     
-    #Test appendage
-    peerList.append(["2.3.8.5", 3000, notConnected, [0, None]])
     
     #Diagnostics
     print("Peerlist: \n"+str(peerList))
@@ -546,7 +598,7 @@ def peerConnection(incom, address = ""):
         setPeerStatus(peerAddr, connected, peerSock)
 
         #Add to the connection list
-        connList[readable].append(peerSock)
+        modifyConnList(peerSock, readable, add)
 
         #Debug data
         alert("New connection list: " + str(connList))
@@ -562,8 +614,22 @@ def peerConnection(incom, address = ""):
             peerSock.connect(address)
         except:
             pass
-        connList[writable].append(peerSock)
+        modifyConnList(peerSock, writable, add)
         setPeerStatus(address, connecting, peerSock)
+
+#A function to ensure manage modifications to the connection list through threads
+def modifyConnList(socket, subList, addRemove):
+    if addRemove:
+        connList[subList].remove(socket)
+    else:
+        connList[subList].append(socket)
+        
+    #If the thread calling this function isn't the socket manager, we need to notify the socket manager
+    if threading.current_thread() != socketManagerThread:
+        signalSocket.send(b"a", sigSockAddr)
+        print("Notified socket manager of external changes.")
+    else:
+        print('Socket manager has made changes.')
 
 #These are placed all in one class for legibility, and to reduce function spam
 class routingTools:
@@ -698,18 +764,123 @@ class routingTools:
                                 dataSocket.sendto(dataToSend, (addr, udpPort))      #TODO: Fix using our udp port as peer port
                                 alert("Sent UDP data only to : (" + str(addr) + ", " + str(udpPort) + "), internal IP: " + routing.prefix + str(extra[1]), '_all')
 
+#This thread waits on all sockets
+#The thread will automatically handle new connections, or connections closed by remote peer
+#All other data is read and place on the mainTaskQueue
+def socketManager(mainTaskQueue):
+    local = threading.local()
+    
+    while True:
+        #Block until some socket is ready
+        local.rSock, local.wSock, local.e = select.select(connList[readable],connList[writable],[])
+        local.jobs = []
+         
+        for s in rSock:
+            alert('New socket(s) available to read.')
+            #Handle new incoming connections
+            if s == mainSocket:
+                peerConnection(incomingConnection)
+
+            #Handle broadcasts picked up via the loopback socket
+            elif s == loopbackSocket:
+                pass
+            
+            #Handle wake-up signals sent over the signal socket
+            elif s == signalSocket:
+                s.recvfrom(ethernetMTU)         
+                print('Socket Manager wake-up message detected.')
+            
+            #Handle data from the data socket (but only when in UDP mode)
+            elif s == dataSocket:
+                local.data = s.recvfrom(ethernetMTU)
+                local.jobs.append([s, local.data])    
+
+
+            else:
+                #Receive the data
+                #This is in a try block to catch force-closed connection exceptions
+                try:
+                    local.data = s.recvfrom(ethernetMTU)
+                except socket.error:
+                    #Connection forcefully closed
+                    alert('Connection from ' + str(local.data[1]) + ' has forcefully closed. Probable cause: crash', "_all")
+                    modifyConnList(s, readable, remove)
+                    
+                    #Diagnostics
+                    alert("Peername: " + str(s.getpeername()) + ", address: " + str(local.data[1]))
+                    alert(recvData)
+                    
+                    #Remove the disconnected peer
+                    setPeerStatus(s.getpeername(), removed)
+                    
+                    #Close the socket
+                    s.close()
+                else:
+                    local.jobs.append([s, local.data])
+                
+
+        for s in wSock:
+            alert('New connections completed.', '_all')
+            #Set peers to connected state, move socket to readable list
+            modifyConnList(s, readable, add)
+            modifyConnList(s, writable, remove)
+            setPeerStatus(s.getpeername(), connected)
+        
+        #Put all information needing processing on the queue
+        mainTaskQueue.put([socketManagerCreator, local.jobs])
+                                
 #The main manager loop
 def runManager():
     #A variable to indicate when to stop
     goOn = True
     deltaTime = 1/updatesPerSecond
+    
+    #Start the socket manager as daemon
+    socketManagerThread = threading.Thread(target=socketManager, args=(mainTaskQueue,), daemon = True)
+    socketManagerThread.start()
 
     #Inform the user on program exit
     print('Connection manager is now running. \nPress CTRL + C to close this program at any time')
-    #TODO: Make the above actually work
 
     while goOn:
+        #Block and wait for jobs
+        try:
+            taskCreator, taskInfo = mainTaskQueue.get(block=True, timeout=deltaTime)
+        except queue.Empty:
+            pass
+        else:
+            if taskCreator == socketManagerCreator:
+                #Handle tasks from the socket manager
+                for job in taskInfo:
+                    #Handle data from the data socket (but only when in UDP mode)
+                    if job[0] == dataSocket:
+                        if settings[myTcpUdpMode] == TcpMode:
+                            #Ignore it, since we are in the wrong mode
+                            continue
+                        else:
+                            #Diagnostics
+                            alert('Incoming UDP data from ' + str(job[1][1]), "_all")
+                            alert(job[1][0])
+                            
+                            #Send packets to the TAP adapter write queue
+                            myTap.writeDataQueue.put(job[1][0])
 
+                    else:
+                            #Diagnostics
+                            alert('Incoming data from ' + str(job[1][1]))
+                            alert(job[1][0])
+                            
+                            if job[1][0][:len(internalManagementIdentifier)] == internalManagementIdentifier.encode():
+                                alert('Internal management info received. Peer at ' + str(job[0].getpeername()) + " has internal IP :" + str(job[1][0][len(internalManagementIdentifier):]), '_all')
+                                routing.addDiscoveredAddr(job[0], ord(job[1][0][len(internalManagementIdentifier):].decode("utf-8")))
+                            else:
+                                #Send packets to the TAP adapter write queue
+                                myTap.writeDataQueue.put(job[1][0])
+            
+            elif taskCreator == adapterReadCreator:
+                #Handle data from the adapter
+                routing.routeAndSend(myTap.readDataQueue.get())
+    
         #Manage peer list
         #---------------------------------
         #Here, we will loop over all peers, updating and connecting, etc
@@ -735,95 +906,15 @@ def runManager():
                         
                 elif connStatus == connecting:
                     if time.time() - connStorage[2] > connectingTimeout:
-                        #Connection forcefully closed
+                        #Connection timed out
                         alert('Attempted connection to ' + str(connStorage[0].getpeername()) + ' has timed out. Peer removed from list.', "_all")
-                        connList[writable].remove(connStorage[0])
+                        modifyConnList(connStorage[0], writable, remove)
                         
                         #Remove the disconnected peer
                         setPeerStatus(connStorage[0].getpeername(), removed)
                         
                         #Close the socket
                         connStorage[0].close()
-                        
-
-        #Manage all sockets
-        #---------------------------------
-        rSock, wSock, e = select.select(connList[readable],connList[writable],[], 0)
-        for s in rSock:
-            alert('New socket(s) available to read.')
-            #Handle new incoming connections
-            if s == mainSocket:
-                peerConnection(incomingConnection)
-
-            #Handle broadcasts picked up via the loopback socket
-            elif s == loopbackSocket:
-                alert('Loopback socket has detected a broadcast')
-                recvData = s.recv(ethernetMTU)
-                alert(str(recvData), '_all')
-                routing.routeAndSend(recvData)
-            
-            #Handle data from the data socket (but only when in UDP mode)
-            elif s == dataSocket:
-                if settings[myTcpUdpMode] == TcpMode:
-                    s.recvfrom(ethernetMTU)     #Discard the data.
-                    print("Data discarded")
-                else:
-                    recvData, addr = s.recvfrom(ethernetMTU)
-                    
-                    #Diagnostics
-                    alert('Incoming UDP data from ' + str(addr), "_all")
-                    alert(recvData)
-                    
-                    #Send packets to the TAP adapter write queue
-                    myTap.writeDataQueue.put(recvData)
-
-            else:
-                #Receive the data
-                #This is in a try block to catch force-closed connection exceptions
-                try:
-                    recvData, addr = s.recvfrom(ethernetMTU)
-                except socket.error:
-                    #Connection forcefully closed
-                    alert('Connection from ' + str(addr) + ' has forcefully closed. Probable cause: crash', "_all")
-                    connList[readable].remove(s)
-                    
-                    #Diagnostics
-                    alert("Peername: " + str(s.getpeername()) + ", address: " + str(addr))
-                    alert(recvData)
-                    
-                    #Remove the disconnected peer
-                    setPeerStatus(s.getpeername(), removed)
-                    
-                    #Close the socket
-                    s.close()
-                else:
-                    #Diagnostics
-                    alert('Incoming data from ' + str(addr))
-                    alert(recvData)
-                    
-                    if recvData[:len(internalManagementIdentifier)] == internalManagementIdentifier.encode():
-                        alert('Internal management info received. Peer at ' + str(s.getpeername()) + " has internal IP :" + str(recvData[len(internalManagementIdentifier):]), '_all')
-                        routing.addDiscoveredAddr(s, ord(recvData[len(internalManagementIdentifier):].decode("utf-8")))
-                    else:
-                        #Send packets to the TAP adapter write queue
-                        myTap.writeDataQueue.put(recvData)
-                
-
-        for s in wSock:
-            alert('New connections completed.', '_all')
-            #Set peers to connected state, move socket to readable list
-            connList[readable].append(s)
-            connList[writable].remove(s)
-            setPeerStatus(s.getpeername(), connected)
-        
-        #Check the adapter for data
-        if myTap.deviceHasData():
-            while myTap.deviceHasData():
-                routing.routeAndSend(myTap.readDataQueue.get())
-
-        #This loop sleeps so that we will run the loop approx
-        #uPS times per second
-        time.sleep(1/updatesPerSecond)
     
 
 
@@ -831,6 +922,12 @@ def runManager():
 #-------------------------
 Initialize()
 alert("Initialized. Verbose mode enabled.", "Initialized. Verbose mode disabled.")
+
+#Setup shutdown handlers so program gracefully closes
+#----------------------------------------------------
+#We use this to catch the console exiting, since it fires on the most events (user closing openGame, log-off, restart, etc)
+win32api.SetConsoleCtrlHandler(shutdown, True)
+
 
 #Instantiate our tuntap class and have it auto-setup
 myTap = tuntapWin(useTUNTAPAutosetup)
@@ -857,11 +954,6 @@ if len(recvData) > 19:
 else:
     print("Announce response is too short")
 routing = routingTools()
-
-#Setup shutdown handlers so program gracefully closes
-#----------------------------------------------------
-#We use the signal module to ensure shutdown, since atexit doesn't execute when closed with signal/message
-signal.signal(signal.SIGTERM, shutdown)
 
 #Enter the main management loop
 #------------------------------
