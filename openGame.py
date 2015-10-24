@@ -19,13 +19,17 @@ TODO/reference:
 -When final address determined, broadcast to network
 -UDP tunnel: needs to use data port, not TCP negotiated port
 -Move routingTools init to after TunTap init, make routingTools upnp synchronous
--Bug: Crash when announcing address to connecting peer
+-Bug: Crash when announcing address to connecting peer if 2 peers trying to connect to each other simultaneously
 -Bug: WMI does not actually set adapter metric, but returns 'operation completed' (Apparently windows 7 bug)
--Reannounce to trackers
--Build as 64 bit and 32 bit exe
+-Reannounce to trackers - threaded
+-Implement NDIS 6 functionality
 -Opengame needs to request Admin privileges if it encounters privilege-related errors
 -Opengame needs to create it's own windows firewall rules http://www.shafqatahmed.com/2008/01/controlling-win.html
--Rewrite code to be thread safe
+-Peer crash causes crash
+-Sets IP address for wrong peer
+==============
+More diagnostics around line 351-352 (completion order, return value checking, timing etc)
+GUI
 '''
 
 import socket, string, random, select, time, struct, math, urllib.request, signal, binascii, os
@@ -41,7 +45,7 @@ import winreg as reg
 import wmi
 
 import queue, threading
-#import tkinter as tk Not needed until GUI
+#import tkinter as tk
 
 #Functions:
 #----------
@@ -52,17 +56,19 @@ def Initialize():
     verboseMode, incomingConnection, outgoingConnection, updatesPerSecond, mainSocket, signalSocket, sigSockAddr, socketManagerThread, readable, writable, \
     recvData, settings, settingsFormatString, myIP, myIPtimestamp, myTrackerData, useTUNTAPAutosetup, useBackupBroadcastDectection, \
     loopbackSocket, ethernetMTU, read, write, internalManagementIdentifier, myTcpUdpMode, UdpMode, TcpMode, connectingTimeout, mainTaskQueue, \
-    adapterReadCreator, socketManagerCreator
+    adapterReadCreator, socketManagerCreator, loggingQueue, logBufferSize
     
     peerList = []
     connList = [[], []]
     settings = [0, 0, 0, ["", 0]]       #[publicIP, timestamp, tunnelMode (TCP or UDP), Trackerdata[Address, reannounce]]
     mainTaskQueue = queue.Queue()
+    loggingQueue = queue.Queue()
 
     #Some settings
     verboseMode = False
     settingsFormatString = "4sI?"   #4 chars (1 byte apiece), unsigned int (4 bytes), boolean (1 byte)
     ethernetMTU = 4096
+    logBufferSize = 65535           #This should probably be optimized later
     internalManagementIdentifier = "OpenGame"
     connectingTimeout = 15          #Wait x seconds for a connection to complete
     #connectionRetryCount = 0       #Never retry a connection, until the program properly handles timeouts
@@ -70,7 +76,7 @@ def Initialize():
     #This is a persistent identifier that we need to track
     connID = b""
 
-    #Some variables to make life easier
+    #Some 'constants' to make life easier
     notConnected = 0
     connecting = 1
     connected = 2
@@ -116,10 +122,11 @@ def Initialize():
     
     #dest = ("open.demonii.com", 1337)
     #backups
-    dest = ("tracker.coppersurfer.tk", 6969)
+    #dest = ("tracker.coppersurfer.tk", 6969)
     #dest = ("tracker.leechers-paradise.org", 6969)
     #dest = ("exodus.desync.com", 6969)
     #dest = ("9.rarbg.me", 2710)
+    dest = ("tracker.glotorrents.com", 6969)
     
     
     #Create TCP server socket
@@ -137,7 +144,7 @@ def Initialize():
     
     #Create the socket manager signalling socket
     #Most openGame comms are via queues, but the socket manager waits with select(), so a socket is necessary
-    sigSockAddr = ("127.0.0.1", random.randint(2000, 20000))
+    sigSockAddr = ("127.0.0.1", random.randint(49152, 65535))
     socketManagerThread = -1
     signalSocket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     signalSocket.bind(sigSockAddr)
@@ -240,22 +247,14 @@ class tuntapWin:
         self.myInterface = 0
         self.trimEthnHeaders = False
         self.ethernetMTU = ethernetMTU
-        self.myMACaddr = b""            #A workaround, as I haven't figured out how to get the return from the GET_MAC control code
-        self.remoteMACaddr = b"\xc4\x15\x53\xb3\x04\x33"    #Basically, when injecting packets, they come from a completely arbitrary address.
-        self.readDataQueue = queue.Queue()
+        self.myMACaddr = b""
         self.writeDataQueue = queue.Queue()
         self.dataThreads = []
         
-        #Constants
-        self.readOperation = 1
-        self.writeOperation = 2
-        
-        #Set up two overlapped structure for async operation, one for reading, the other for writing
-        self.overlapped = []
-        for i in range(2):
-            self.overlapped.append(pywintypes.OVERLAPPED())
-            self.overlapped[i].hEvent  = win32event.CreateEvent(None, 0, 0, None)
-        self.readBuffer = win32file.AllocateReadBuffer(self.ethernetMTU)
+        #Set up an overlapped structure for deviceIoControl
+        #This originally created an array of overlapped stuctures used throughout this class, but now threads create their own for safety
+        self.overlapped = pywintypes.OVERLAPPED()
+        self.overlapped.hEvent  = win32event.CreateEvent(None, 0, 0, None)
         
         
         #Some function encapsulation
@@ -286,13 +285,15 @@ class tuntapWin:
             
             self.myInterface = self.createInterface()
             if (self.myInterface):
-                self.setMediaConnectionStatus(True) 
+                #Connect media, and get our MAC address
+                self.setMediaConnectionStatus(True)
+                self.updateMAC()
             else:
                 alert("Failed to interface with TAP adapter. Exiting in 5 seconds.", "_all")
                 time.sleep(5)
                 sys.exit()
             
-            self.dataThreads.append(threading.Thread(target=self.dataListenerThread, args=(self.readDataQueue,mainTaskQueue,), daemon = True))
+            self.dataThreads.append(threading.Thread(target=self.dataListenerThread, args=(mainTaskQueue, ethernetMTU), daemon = True))
             self.dataThreads.append(threading.Thread(target=self.dataWriterThread, args=(self.writeDataQueue,), daemon = True))
             self.dataThreads[0].start()
             alert('Data listener thread started as daemon.')
@@ -308,7 +309,16 @@ class tuntapWin:
     
     #A function to set the media status as either connected or disconnected in windows
     def setMediaConnectionStatus(self, toConnected):
-        win32file.DeviceIoControl(self.myInterface, self.TAP_IOCTL_SET_MEDIA_STATUS, toConnected.to_bytes(4, "little"), None)
+        #In most TunTap examples, the following line omits an overlapped structure. However, the windows documentation says it should be used
+        #if the handle is created with the overlapped flag set. The offsets should be initialized to zero, then left unused.
+        win32file.DeviceIoControl(self.myInterface, self.TAP_IOCTL_SET_MEDIA_STATUS, toConnected.to_bytes(4, "little"), None, self.overlapped)
+    
+    #A simple function to update/return the MAC address
+    def updateMAC(self):
+        #The following command can not have an overlapped structure passed to it (throws invalid command exception)
+        self.myMACaddr = win32file.DeviceIoControl(self.myInterface, self.TAP_IOCTL_GET_MAC, None, 16)
+        alert("MAC address updated: " + str(self.myMACaddr))
+        return self.myMACaddr
 
     def createInterface(self):
         if self.myGUID == "":
@@ -320,7 +330,7 @@ class tuntapWin:
                                       win32file.GENERIC_READ | win32file.GENERIC_WRITE,
                                       win32file.FILE_SHARE_READ | win32file.FILE_SHARE_WRITE,
                                       None, win32file.OPEN_EXISTING,
-                                      win32file.FILE_ATTRIBUTE_SYSTEM | win32file.FILE_FLAG_OVERLAPPED,
+                                      win32file.FILE_ATTRIBUTE_SYSTEM | win32file.FILE_FLAG_OVERLAPPED | win32file.FILE_FLAG_NO_BUFFERING,
                                       None)
                                       
             except:
@@ -329,66 +339,63 @@ class tuntapWin:
     
     #A function to constantly grab data from the tap device, perform some basic filtering, and enter the results in a queue
     #This function is no longer portable as-is, references to the main queue would need to be removed
-    def dataListenerThread(self, resultsQueue, mainTaskQueue):
+    def dataListenerThread(self, mainTaskQueue, MTU):
         #Create local variable class
         local = threading.local()
+
+        #Allocate our read buffer
+        local.readBuffer = win32file.AllocateReadBuffer(MTU)
+        
+        #Create an event to wait on
+        local.overlapped = pywintypes.OVERLAPPED()
+        local.overlapped.hEvent  = win32event.CreateEvent(None, 0, 0, None)
         
         while True:
             try:
-                local.readResult = win32file.ReadFile(self.myInterface, self.readBuffer, self.overlapped[read])
-                win32event.WaitForSingleObject(self.overlapped[read].hEvent, win32event.INFINITE)
+                local.readResult = win32file.ReadFile(self.myInterface, local.readBuffer, local.overlapped)
+                local.a = win32event.WaitForSingleObject(local.overlapped.hEvent, win32event.INFINITE)
                 
-                #We increment this to allow the device to properly read data in the event that there is more than one packet in waiting to be read
-                self.overlapped[read].Offset += len(local.readResult[1])
+                #Diagnostics
+                if local.a != win32event.WAIT_OBJECT_0:
+                    print("Data Listener Thread: Error while waiting on read completion signal: " + str(local.a))
+                
             except:
                 print("Device malfunctioned during read operation. Attempting to continue...")
                 continue
-
-            #MAC Address autodiscover
-            #WORKAROUND: If our own MAC hasn't yet been discovered, auto-set it now
-            if not self.myMACaddr:
-                self.myMACaddr = bytes(local.readResult[1][6:12])
-                alert("MAC address auto-discovered: " + str(self.myMACaddr), '_all')
                     
             #Truncate to the actual data - only for IP Packets
             #TODO: This functionality has been hacked, this needs to be redone to work properly
             if bytes(local.readResult[1][12:14]) == b"\x08\x00" :
                 local.dataLen = int.from_bytes(local.readResult[1][16:18], 'big')
-                resultsQueue.put(bytes(local.readResult[1][14*self.trimEthnHeaders:14+local.dataLen]))
-                mainTaskQueue.put([adapterReadCreator, None])
+                mainTaskQueue.put([adapterReadCreator, bytes(local.readResult[1][14*self.trimEthnHeaders:14+local.dataLen])])
                        
             elif bytes(local.readResult[1][12:14]) == b"\x08\x06":
                 local.dataLen = 28       #ARP on IPv4 are always 28 bytes long
-                resultsQueue.put(bytes(local.readResult[1][14*self.trimEthnHeaders:14+local.dataLen]))
-                mainTaskQueue.put([adapterReadCreator, None])
+                mainTaskQueue.put([adapterReadCreator, bytes(local.readResult[1][14*self.trimEthnHeaders:14+local.dataLen])])
             else:
                 alert('Non-IP/ARP packet was discarded. EtherType code: ' + str(bytes(local.readResult[1][12:14])))
     
     def dataWriterThread(self, toWriteQueue):
         #Create local variable class
         local = threading.local()
+        
+        #Create an event to wait on
+        local.overlapped = pywintypes.OVERLAPPED()
+        local.overlapped.hEvent  = win32event.CreateEvent(None, 0, 0, None)
     
         while True:
             #Block and wait for data
             if self.trimEthnHeaders:
                 #Add Ethernet header back onto the packet (since it was removed)
-                local.writeData = self.myMACaddr + self.remoteMACaddr + b"\x08\x00" + toWriteQueue.get(block=True)
+                #TODO: this function needs to perform a lookup of the MAC address
+                local.remoteMACaddr = b"\xc4\x15\x53\xb3\x04\x33"
+                local.writeData = self.myMACaddr + local.remoteMACaddr + b"\x08\x00" + toWriteQueue.get(block=True)
             else:
                 local.writeData = toWriteQueue.get(block=True)
             
-            alert('Injecting packet on adapter')
-            win32file.WriteFile(self.myInterface, local.writeData, self.overlapped[write])
-            win32event.WaitForSingleObject(self.overlapped[write].hEvent, win32event.INFINITE)
-            
-            #We increment this because everyone else does (real reason not known)
-            #self.overlapped[write].Offset += len(self.writeData)
-            pass
- 
-    def deviceHasData(self):
-        if not self.readDataQueue.empty():
-            return self.readDataQueue.qsize()
-        else:
-            return False
+            #alert('Injecting packet on adapter')
+            win32file.WriteFile(self.myInterface, local.writeData, local.overlapped)
+            win32event.WaitForSingleObject(local.overlapped.hEvent, win32event.INFINITE)
     
     #This function updates the IP address and mask of the adapter, and additionally
     #checks to make sure the interface metric is set to 1
@@ -443,6 +450,21 @@ def alert(verbose, nonverbose =""):
         print(verbose)
     elif nonverbose:
         print(nonverbose)
+        
+    #Put on the logging queue
+    loggingQueue.put(verbose)
+
+#This function logs in order of execution, and saves to disk
+def loggingHandlerThread(loggingQueue, loggingFilename):
+    #Create local variable class
+    local = threading.local()
+    
+    with open(loggingFilename, 'w') as local.f:
+        alert("Logging thread started.")
+        while True:
+            local.a = loggingQueue.get()
+            local.f.write(str(local.a)+"\n")
+            local.f.flush()
 
 #This function properly shuts down the program
 def shutdown(*args):
@@ -523,7 +545,7 @@ def Announce():
 #A function to index returned addresses into the peerlist
 #Used to initialize an empty peerlist
 def indexAddresses(rawAddr):
-    for i in range(len(rawAddr)//6):
+    for i in range(0, len(rawAddr), 6):
         #Older method of doing things
         #a = ".".join([str(int.from_bytes([rawAddr[i]], 'big')), str(int.from_bytes([rawAddr[i+1]], 'big')), str(int.from_bytes([rawAddr[i+2]], 'big')), str(int.from_bytes([rawAddr[i+3]], 'big'))])
         a = socket.inet_ntoa(rawAddr[i:i+4])
@@ -550,6 +572,7 @@ def setPeerStatus(addr, status, peerSock = None):
     else:
         if status != removed:
             #Add peer into the peerlist, tracking both the address and socket
+            if peerSock == None: alert("WARNING: New peer added to list without an associated socket!")
             peerList.append([addr[0], addr[1], status, [peerSock, None]])
             alert('Added to peerlist.', "_all")
             alert(peerSock)
@@ -590,6 +613,7 @@ def setPeerStatus(addr, status, peerSock = None):
         alert("Peer at " + str(addr) + " was removed from the peer list.")
 
 #A potentially pointless function to connect to peers
+#Incoming connections always called from socketManager thread, Outgoing always called from runManager Thread
 def peerConnection(incom, address = ""):
     if incom:
         #Handle the new incoming connection
@@ -626,7 +650,7 @@ def modifyConnList(socket, subList, addRemove):
         
     #If the thread calling this function isn't the socket manager, we need to notify the socket manager
     if threading.current_thread() != socketManagerThread:
-        signalSocket.send(b"a", sigSockAddr)
+        signalSocket.sendto(b"a", sigSockAddr)
         print("Notified socket manager of external changes.")
     else:
         print('Socket manager has made changes.')
@@ -744,10 +768,10 @@ class routingTools:
                 if self.isBroadcast(destAddress) or isArp:
                     if settings[myTcpUdpMode] == TcpMode:
                         extra[0].sendall(dataToSend)
-                        alert("Broadcast data sent to : " + str(extra[0].getpeername()), '_all')
+                        #alert("Broadcast data sent to : " + str(extra[0].getpeername()), '_all')
                     else:
                         dataSocket.sendto(dataToSend, (addr, udpPort))      #TODO: Fix using our udp port as peer port
-                        alert("UDP broadcast data sent to: (" + str(addr) + ", " + str(port) + ")", '_all')
+                        #alert("UDP broadcast data sent to: (" + str(addr) + ", " + str(port) + ")", '_all')
                 else:
                     #Here we send data to a single peer
                     #Search the peerlist for the peer, then send
@@ -758,77 +782,75 @@ class routingTools:
                         if settings[myTcpUdpMode] == TcpMode:
                                 if socket.inet_aton(routing.prefix + str(extra[1])) == destAddress:
                                     extra[0].sendall(dataToSend)
-                                    alert("Sent data only to : " + str(extra[0].getpeername()) + ", internal IP: " + str(routing.prefix + extra[1]), '_all')
+                                    #alert("Sent data only to : " + str(extra[0].getpeername()) + ", internal IP: " + str(routing.prefix + extra[1]), '_all')
                         else:
                             if socket.inet_aton(routing.prefix + str(extra[1])) == destAddress:
                                 dataSocket.sendto(dataToSend, (addr, udpPort))      #TODO: Fix using our udp port as peer port
-                                alert("Sent UDP data only to : (" + str(addr) + ", " + str(udpPort) + "), internal IP: " + routing.prefix + str(extra[1]), '_all')
+                                #alert("Sent UDP data only to : (" + str(addr) + ", " + str(udpPort) + "), internal IP: " + routing.prefix + str(extra[1]), '_all')
+                                pass
 
 #This thread waits on all sockets
 #The thread will automatically handle new connections, or connections closed by remote peer
 #All other data is read and place on the mainTaskQueue
 def socketManager(mainTaskQueue):
     local = threading.local()
+    local.s = None
     
     while True:
         #Block until some socket is ready
         local.rSock, local.wSock, local.e = select.select(connList[readable],connList[writable],[])
-        local.jobs = []
          
-        for s in rSock:
+        for local.s in local.rSock:
             alert('New socket(s) available to read.')
             #Handle new incoming connections
-            if s == mainSocket:
+            if local.s == mainSocket:
                 peerConnection(incomingConnection)
 
             #Handle broadcasts picked up via the loopback socket
-            elif s == loopbackSocket:
+            elif local.s == loopbackSocket:
                 pass
             
             #Handle wake-up signals sent over the signal socket
-            elif s == signalSocket:
-                s.recvfrom(ethernetMTU)         
-                print('Socket Manager wake-up message detected.')
+            elif local.s == signalSocket:
+                local.s.recvfrom(ethernetMTU)
             
             #Handle data from the data socket (but only when in UDP mode)
-            elif s == dataSocket:
-                local.data = s.recvfrom(ethernetMTU)
-                local.jobs.append([s, local.data])    
+            elif local.s == dataSocket:
+                local.data = local.s.recvfrom(ethernetMTU)
+                mainTaskQueue.put([socketManagerCreator, [local.s, local.data]])    
 
 
             else:
                 #Receive the data
                 #This is in a try block to catch force-closed connection exceptions
                 try:
-                    local.data = s.recvfrom(ethernetMTU)
+                    local.data = local.s.recvfrom(ethernetMTU)
                 except socket.error:
                     #Connection forcefully closed
                     alert('Connection from ' + str(local.data[1]) + ' has forcefully closed. Probable cause: crash', "_all")
-                    modifyConnList(s, readable, remove)
+                    modifyConnList(local.s, readable, remove)
                     
                     #Diagnostics
-                    alert("Peername: " + str(s.getpeername()) + ", address: " + str(local.data[1]))
+                    alert("Peername: " + str(local.s.getpeername()) + ", address: " + str(local.data[1]))
                     alert(recvData)
                     
                     #Remove the disconnected peer
-                    setPeerStatus(s.getpeername(), removed)
+                    setPeerStatus(local.s.getpeername(), removed)
                     
                     #Close the socket
-                    s.close()
+                    local.s.close()
                 else:
-                    local.jobs.append([s, local.data])
+                    mainTaskQueue.put([socketManagerCreator, [local.s, local.data]])    
                 
 
-        for s in wSock:
+        for local.s in local.wSock:
             alert('New connections completed.', '_all')
             #Set peers to connected state, move socket to readable list
-            modifyConnList(s, readable, add)
-            modifyConnList(s, writable, remove)
-            setPeerStatus(s.getpeername(), connected)
-        
-        #Put all information needing processing on the queue
-        mainTaskQueue.put([socketManagerCreator, local.jobs])
-                                
+            modifyConnList(local.s, readable, add)
+            modifyConnList(local.s, writable, remove)
+            setPeerStatus(local.s.getpeername(), connected)
+
+            
 #The main manager loop
 def runManager():
     #A variable to indicate when to stop
@@ -851,7 +873,7 @@ def runManager():
         else:
             if taskCreator == socketManagerCreator:
                 #Handle tasks from the socket manager
-                for job in taskInfo:
+                for job in [taskInfo]:
                     #Handle data from the data socket (but only when in UDP mode)
                     if job[0] == dataSocket:
                         if settings[myTcpUdpMode] == TcpMode:
@@ -859,16 +881,16 @@ def runManager():
                             continue
                         else:
                             #Diagnostics
-                            alert('Incoming UDP data from ' + str(job[1][1]), "_all")
-                            alert(job[1][0])
+                            #alert('Incoming UDP data from ' + str(job[1][1]), "_all")
+                            #print(job[1][0])
                             
                             #Send packets to the TAP adapter write queue
                             myTap.writeDataQueue.put(job[1][0])
 
                     else:
                             #Diagnostics
-                            alert('Incoming data from ' + str(job[1][1]))
-                            alert(job[1][0])
+                            #alert('Incoming data from ' + str(job[1][1]))
+                            #print(job[1][0])
                             
                             if job[1][0][:len(internalManagementIdentifier)] == internalManagementIdentifier.encode():
                                 alert('Internal management info received. Peer at ' + str(job[0].getpeername()) + " has internal IP :" + str(job[1][0][len(internalManagementIdentifier):]), '_all')
@@ -879,12 +901,12 @@ def runManager():
             
             elif taskCreator == adapterReadCreator:
                 #Handle data from the adapter
-                routing.routeAndSend(myTap.readDataQueue.get())
+                routing.routeAndSend(taskInfo)
     
         #Manage peer list
         #---------------------------------
         #Here, we will loop over all peers, updating and connecting, etc
-        #We loop over a shallow copy, because (insert valid reason) -> we may modify the list inside of this loop
+        #We loop over a shallow copy, because we may modify the list inside of this loop
         for i, (a, p, connStatus, connStorage) in enumerate(peerList[:]):
             #Handle all unconnected peers
             #Unconnected peer storage is as follows:
@@ -921,6 +943,9 @@ def runManager():
 #--Main program sequence--
 #-------------------------
 Initialize()
+print(os.path.dirname(os.path.abspath(__file__))+r'\log.txt')
+logThread = threading.Thread(target=loggingHandlerThread, args=(loggingQueue, os.path.dirname(os.path.abspath(__file__))+r'\log.txt'), daemon = False)
+logThread.start()
 alert("Initialized. Verbose mode enabled.", "Initialized. Verbose mode disabled.")
 
 #Setup shutdown handlers so program gracefully closes
