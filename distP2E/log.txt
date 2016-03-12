@@ -1,0 +1,10 @@
+Either saved IP was stale, invalid, or the settings file was just created. Retrieving public IP...
+Public IP discovered from online service: 64.138.211.97
+Initialized. Verbose mode enabled.
+Logging thread started.
+Tap GUID: {7E69327C-4CCA-4005-9096-AE4FF4A06FD3}
+MAC address updated: b'\x00\xff~i2|'
+Data listener thread started as daemon.
+Data injector thread started as daemon.
+Tuntap device initialized, interface created.
+b"\x00\x00\x04\x17'\x10\x19\x80\x00\x00\x00\x00\x00\x00pr"
