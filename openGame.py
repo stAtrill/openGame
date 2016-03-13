@@ -23,16 +23,19 @@ TODO/reference:
 -Implement NDIS 6 functionality
 -Opengame needs to request Admin privileges if it encounters privilege-related errors
 -Peer crash causes crash
--Only remaining potentially un-threadsafe function is peerConnection
+-Check potentially un-threadsafe functions: peerConnection
 ==============
 More diagnostics around line 351-352 (completion order, return value checking, timing etc)
 -Check for race condition involving events in data listener thread
 -Datalistenerthread should not pass any data if there were errors
+-Catch exceptions if port in use, check for alternate program instance running
+-Recent peers
+peerexchange
 miniupnp
 GUI
 '''
 
-import socket, string, random, select, time, struct, math, urllib.request, signal, binascii, os
+import socket, string, random, select, time, struct, math, urllib.request, signal, binascii, os, win32ui, ctypes, sys
 
 #These are all needed for the TunTapWin class
 import win32file
@@ -56,8 +59,8 @@ def Initialize():
     global peerList, connList, connID, dest, udpPort, tcpPort, dataSocket, notConnected, connecting, connected, removed, add, remove,\
     connListLock, incomingConnection, outgoingConnection, updatesPerSecond, mainSocket, signalSocket, sigSockAddr, socketManagerThread, readable, writable, \
     recvData, settings, settingsFormatString, myIP, myIPtimestamp, myTrackerData, useTUNTAPAutosetup, useBackupBroadcastDectection, \
-    loopbackSocket, ethernetMTU, read, write, internalManagementIdentifier, myTcpUdpMode, UdpMode, TcpMode, connectingTimeout, mainTaskQueue, \
-    adapterReadCreator, socketManagerCreator, loggingQueue, logBufferSize, verbosityLevel, alwaysPrint
+    loopbackSocket, ethernetBufferSize, read, write, internalManagementIdentifier, myTcpUdpMode, UdpMode, TcpMode, connectingTimeout, mainTaskQueue, \
+    adapterReadCreator, socketManagerCreator, loggingQueue, logBufferSize, verbosityLevel, alwaysPrint, trackerList
     
     peerList = []
     connList = [[], []]
@@ -68,7 +71,7 @@ def Initialize():
 
     #Some settings
     settingsFormatString = "4sI?"   #4 chars (1 byte apiece), unsigned int (4 bytes), boolean (1 byte)
-    ethernetMTU = 16384
+    ethernetBufferSize = 16384
     logBufferSize = 65535           #This should probably be optimized later
     internalManagementIdentifier = "OpenGame"
     connectingTimeout = 15          #Wait x seconds for a connection to complete
@@ -131,6 +134,9 @@ def Initialize():
     #dest = ("exodus.desync.com", 6969)
     #dest = ("9.rarbg.me", 2710)
     #dest = ("tracker.glotorrents.com", 6969)
+    
+    trackerList = [("open.demonii.com", 1337), ("tracker.coppersurfer.tk", 6969), ("tracker.leechers-paradise.org", 6969), \
+            ("exodus.desync.com", 6969),  ("9.rarbg.me", 2710), ("tracker.glotorrents.com", 6969), ('tracker.blackunicorn.xyz', 6969)]
     
     
     #Create TCP server socket
@@ -250,7 +256,7 @@ class tuntapWin:
         self.myGUID = ""
         self.myInterface = 0
         self.trimEthnHeaders = False
-        self.ethernetMTU = ethernetMTU
+        self.ethernetBufferSize = ethernetBufferSize
         self.myMACaddr = b""
         self.writeDataQueue = queue.Queue()
         self.dataThreads = []
@@ -297,7 +303,7 @@ class tuntapWin:
                 time.sleep(5)
                 sys.exit()
             
-            self.dataThreads.append(threading.Thread(target=self.dataListenerThread, args=(mainTaskQueue, ethernetMTU), daemon = True))
+            self.dataThreads.append(threading.Thread(target=self.dataListenerThread, args=(mainTaskQueue, ethernetBufferSize), daemon = True))
             self.dataThreads.append(threading.Thread(target=self.dataWriterThread, args=(self.writeDataQueue,), daemon = True))
             self.dataThreads[0].start()
             log('Data listener thread started as daemon.')
@@ -371,7 +377,6 @@ class tuntapWin:
                 
             except Exception as e:
                 log("Device malfunctioned during read operation." + str(e) + " Attempting to continue...", alwaysPrint)
-                continue
             else:
                 #Truncate to the actual data - only for IP Packets
                 #TODO: This functionality has been hacked, this needs to be redone to work properly
@@ -381,6 +386,10 @@ class tuntapWin:
                            
                 elif bytes(local.readResult[1][12:14]) == b"\x08\x06":
                     local.dataLen = 28       #ARP on IPv4 are always 28 bytes long
+                    mainTaskQueue.put([adapterReadCreator, bytes(local.readResult[1][14*self.trimEthnHeaders:14+local.dataLen])])
+                    
+                elif bytes(local.readResult[1][12:14]) == b"\x86\xdd":
+                    local.dataLen = int.from_bytes(local.readResult[1][16:20], 'big')
                     mainTaskQueue.put([adapterReadCreator, bytes(local.readResult[1][14*self.trimEthnHeaders:14+local.dataLen])])
                 else:
                     log('Non-IP/ARP packet was discarded. EtherType code: ' + str(bytes(local.readResult[1][12:14])))
@@ -401,15 +410,19 @@ class tuntapWin:
             #TODO: this function needs to perform a lookup of the MAC address
             local.remoteMACaddr = b"\xc4\x15\x53\xb3\x04\x33"
             
+            #All of the below is broken and shouldn't be used.
             while True:
                 local.writeData = self.myMACaddr + local.remoteMACaddr + b"\x08\x00" + toWriteQueue.get(block=True)
                 win32file.WriteFile(self.myInterface, local.writeData, local.overlapped)
                 win32event.WaitForSingleObject(local.overlapped.hEvent, win32event.INFINITE)
         else:
             while True:
-                local.writeData = toWriteQueue.get(block=True)
-                win32file.WriteFile(self.myInterface, local.writeData, local.overlapped)
-                win32event.WaitForSingleObject(local.overlapped.hEvent, win32event.INFINITE)
+                try:
+                    local.writeData = toWriteQueue.get(block=True)
+                    win32file.WriteFile(self.myInterface, local.writeData, local.overlapped)
+                    win32event.WaitForSingleObject(local.overlapped.hEvent, win32event.INFINITE)
+                except Exception as e:
+                    log("Device malfunctioned during write operation." + str(e) + " Attempting to continue...", alwaysPrint)
 
     
     #This function updates the IP address and mask of the adapter, and additionally
@@ -430,12 +443,21 @@ class tuntapWin:
                         log("IP Address of interface successfully set:" + str(myIP), alwaysPrint)
                         
                         #Update the connection metric if it isn't 1 and setting address was successful
-                        if interface.IPConnectionMetric != 1:
-                            oldMetric = interface.IPConnectionMetric
-                            e = interface.SetIPConnectionMetric(1)
-                            if e[0] == 0:
-                                log("Interface metric was updated. Old metric was " + str(oldMetric) + ".", alwaysPrint)
-                            else:
+                        if interface.IPConnectionMetric != 1 or True:
+                            #oldMetric = interface.IPConnectionMetric
+                            #e = interface.SetIPConnectionMetric(1)
+                            
+                            #The WMI interface will fail to set the metric, but will return successful.  Looking further, it seems to be a windows bug.
+                            #Here we simply modify the registry directly.
+                            self.ipKey = r"SYSTEM\CurrentControlSet\services\Tcpip\Parameters\Interfaces\ "[:-1]+self.myGUID
+                            try:
+                                with reg.OpenKey(reg.HKEY_LOCAL_MACHINE, self.ipKey, access = reg.KEY_ALL_ACCESS) as tcpipInterface:
+                                    reg.SetValueEx(tcpipInterface, "InterfaceMetric", 0, reg.REG_DWORD, 1)
+                                    reg.SetValueEx(tcpipInterface, "TCPNoDelay", 0, reg.REG_DWORD, 1)
+                                    reg.SetValueEx(tcpipInterface, "TCPAckFrequency", 0, reg.REG_DWORD, 1)
+                                
+                                    log("Interface metric was updated. Old metric was " + str(oldMetric) + ".", alwaysPrint)
+                            except:
                                 log("Failed while attempting to update interface metric.", alwaysPrint)
                         return True
                     elif c[0] < 0: 
@@ -461,7 +483,7 @@ def initBroadcastLoopbackMethod():
 
 #This function will output to the log queue for the logging thread to process. Use alwaysPrint to guarantee printing.
 def log(message, verbosityLevel = 0):   
-    loggingQueue.put((message, verbosityLevel))
+    loggingQueue.put((message, verbosityLevel, time.clock()))
 
 #This function logs messages in order of execution, and saves to disk. Additionally, it may print these messages to console
 def loggingHandlerThread(loggingQueue, loggingFilename):
@@ -472,7 +494,7 @@ def loggingHandlerThread(loggingQueue, loggingFilename):
         log("Logging thread started.")
         while True:
             local.a = loggingQueue.get()
-            local.f.write(str(local.a[0])+"\n")
+            local.f.write("(" + str(round(local.a[2], 6)) + ")" + str(local.a[0])+"\n")
             local.f.flush()
             
             #Print the statement if it is above the verbosity level, or if there is a supplied message intended for printing
@@ -496,10 +518,16 @@ def shutdown(*args):
     #---------------------------------------------------
     for sock in connList[readable][1:] + connList[writable]:
         if sock != dataSocket and sock != signalSocket:
-            sock.shutdown(socket.SHUT_RDWR)
-            sock.close()
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+                sock.close()
+            except socket.error:
+                pass
         
     log('Shutdown complete. Exiting...', alwaysPrint)
+    
+    #We use os._exit() rather than sys.exit() because sys.exit() does not exit when built as exe
+    os._exit(0)
 
 #This function completely handles making connection to a tracker
 def trackerConnect(destAddress):
@@ -513,7 +541,7 @@ def trackerConnect(destAddress):
     #Decode response
     #------------------------
     #TODO: make this select based, and give user option to wait or move on if response is slow
-    recvData, addr = dataSocket.recvfrom(ethernetMTU)
+    recvData, addr = dataSocket.recvfrom(ethernetBufferSize)
 
     #Perform integrity checks and
     #Return True if response checks out
@@ -591,10 +619,10 @@ def setPeerStatus(addr, status, peerSock = None):
             #Add peer into the peerlist, tracking both the address and socket
             if peerSock == None: log("WARNING: New peer added to list without an associated socket!")
             peerList.append([addr[0], addr[1], status, [peerSock, None]])
-            log('Added to peerlist.', alwaysPrint)
+            log('Added to peerlist.')
             log(peerSock)
         else:
-            log('The peer was not found in the peerlist to remove.', alwaysPrint)
+            log('The peer was not found in the peerlist to remove.')
 
         
     #Edit the peer's status
@@ -623,9 +651,9 @@ def setPeerStatus(addr, status, peerSock = None):
     if status == notConnected:
         log("Peer at " + str(addr) + " set to not connected.")
     elif status == connecting:
-        log("Peer at " + str(addr) + " set to connecting.", alwaysPrint)
+        log("Peer at " + str(addr) + " set to connecting.")
     elif status == connected:
-        log("Peer at " + str(addr) + " set to connected.", alwaysPrint)
+        log("Peer at " + str(addr) + " set to connected.")
     elif status == removed:
         log("Peer at " + str(addr) + " was removed from the peer list.")
 
@@ -658,7 +686,7 @@ def peerConnection(incom, address = ""):
         modifyConnList(peerSock, writable, add)
         setPeerStatus(address, connecting, peerSock)
 
-#A function to ensure manage modifications to the connection list through threads
+#A function to manage modifications to the connection list through threads
 def modifyConnList(socket, subList, addRemove):
     #The following needs to be atomic to prevent corruption in certain cases
     connListLock.acquire()
@@ -688,7 +716,7 @@ class routingTools:
         self.addrInUse[1] = True
         
         #TODO: Setup the adapter, and determine the internal prefix
-        self.prefix = "11.0.0."
+        self.prefix = "10.0.0."
         self.netMask = "0111"           #This is used piecemeal; refers to which fields need to be checked as broadcast (for internal use only)
         self.myAddr = len(peerList)+1     #This is an initial heuristic that may be overridden when our address is finalized
         self.isAddrSet = False
@@ -815,11 +843,10 @@ class routingTools:
                             if socket.inet_aton(routing.prefix + str(extra[1])) == destAddress:
                                 dataSocket.sendto(dataToSend, (addr, udpPort))      #TODO: Fix using our udp port as peer port
                                 log("Sent UDP data only to : (" + str(addr) + ", " + str(udpPort) + "), internal IP: " + routing.prefix + str(extra[1]))
-                                pass
 
 #This thread waits on all sockets
 #The thread will automatically handle new connections, or connections closed by remote peer
-#All other data is read and place on the mainTaskQueue
+#All other data is read and placed on the mainTaskQueue
 def socketManager(mainTaskQueue):
     local = threading.local()
     local.s = None
@@ -840,11 +867,11 @@ def socketManager(mainTaskQueue):
             
             #Handle wake-up signals sent over the signal socket
             elif local.s == signalSocket:
-                local.s.recvfrom(ethernetMTU)
+                local.s.recvfrom(ethernetBufferSize)
             
             #Handle data from the data socket (but only when in UDP mode)
             elif local.s == dataSocket:
-                local.data = local.s.recvfrom(ethernetMTU)
+                local.data = local.s.recvfrom(ethernetBufferSize)
                 mainTaskQueue.put([socketManagerCreator, [local.s, local.data]])    
 
 
@@ -852,7 +879,7 @@ def socketManager(mainTaskQueue):
                 #Receive the data
                 #This is in a try block to catch force-closed connection exceptions
                 try:
-                    local.data = local.s.recvfrom(ethernetMTU)
+                    local.data = local.s.recvfrom(ethernetBufferSize)
                 #ConnectionResetError
                 except ConnectionResetError:
                     #Connection forcefully closed
@@ -959,7 +986,8 @@ def runManager():
                 elif connStatus == connecting:
                     if time.time() - connStorage[2] > connectingTimeout:
                         #Connection timed out
-                        log('Attempted connection to ' + str(connStorage[0].getpeername()) + ' has timed out. Peer removed from list.', alwaysPrint)
+                        print(connStorage[0])
+                        log('Attempted connection to ' +str(connStorage[0].getpeername()) +  ' has timed out. Peer removed from list.', alwaysPrint)
                         modifyConnList(connStorage[0], writable, remove)
                         
                         #Remove the disconnected peer
@@ -972,14 +1000,25 @@ def runManager():
 
 #--Main program sequence--
 #-------------------------
+time.clock()    #Starts our internal clock, used for logging
+
+#Check for duplicate program instances
+try:
+    win32ui.FindWindow(None, "openGame")
+except win32ui.error:
+    #We set our window down here so we don't find our own window earlier
+    ctypes.windll.kernel32.SetConsoleTitleW("openGame")
+else:
+    print("Duplicate program instance found. Please close the other running instance before restarting. Autoclosing in 5 seconds.")
+    time.sleep(5)
+    os._exit(0)
+
 Initialize()
 try:
     logThread = threading.Thread(target=loggingHandlerThread, args=(loggingQueue, os.path.dirname(os.path.abspath(__file__))+r'\log.txt'), daemon = False)
 except NameError:
     #When running as executable, the __file__ global is not defined.
-    import sys
     logThread = threading.Thread(target=loggingHandlerThread, args=(loggingQueue, os.path.dirname(os.path.abspath(sys.argv[0]))+r'\log.txt'), daemon = False)
-    
 logThread.start()
 log("Initialized. Verbosity level is set to " + str(verbosityLevel))
 
@@ -1005,7 +1044,7 @@ else:
 
 #Decode announce response
 #------------------------
-recvData, addr = dataSocket.recvfrom(ethernetMTU)
+recvData, addr = dataSocket.recvfrom(ethernetBufferSize)
 log("Announce response: " + str(recvData))
 if len(recvData) > 19:
     #TODO: check action, etc, blahblah
@@ -1025,4 +1064,3 @@ except KeyboardInterrupt:
     pass
 finally:
     shutdown()
-    sys.exit()

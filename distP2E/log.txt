@@ -1,10 +1,34 @@
-Either saved IP was stale, invalid, or the settings file was just created. Retrieving public IP...
-Public IP discovered from online service: 64.138.211.97
-Initialized. Verbose mode enabled.
-Logging thread started.
-Tap GUID: {7E69327C-4CCA-4005-9096-AE4FF4A06FD3}
-MAC address updated: b'\x00\xff~i2|'
-Data listener thread started as daemon.
-Data injector thread started as daemon.
-Tuntap device initialized, interface created.
-b"\x00\x00\x04\x17'\x10\x19\x80\x00\x00\x00\x00\x00\x00pr"
+(0.004359)Public IP restored from saved values: 71.70.198.47
+(0.00458)Old IP address is 5861 seconds old.
+(0.004607)Initialized. Verbosity level is set to 1
+(0.004625)Logging thread started.
+(0.004739)Tap GUID: {7E69327C-4CCA-4005-9096-AE4FF4A06FD3}
+(0.004978)MAC address updated: b'\x00\xff~i2|'
+(0.005169)Data listener thread started as daemon.
+(0.00529)Data injector thread started as daemon.
+(0.005326)Tuntap device initialized, interface created.
+(0.005433)b"\x00\x00\x04\x17'\x10\x19\x80\x00\x00\x00\x00\x00\x00]\x0b"
+(0.827212)Response: b'\x00\x00\x00\x00\x00\x00]\x0b\xfd\xdc\xcf~}A\xdb\x85'
+(0.827496)Connection ID: b'\xfd\xdc\xcf~}A\xdb\x85'
+(0.82767)Announced to tracker.
+(0.943092)Announce response: b'\x00\x00\x00\x01\x00\x00&\xe9\x00\x00\x07D\x00\x00\x00\x02\x00\x00\x00\x00\x18\x0bze\x13\x88GF\xc6/\x13\x88'
+(0.943154)Reannounce interval: 1860 seconds
+(0.943172)Peerlist: 
+[['24.11.122.101', 5000, 0, [0, None]]]
+(0.94359)Routing tools initialized. My internal ip address initialized to :10.0.0.2
+(0.943813)Not able to set internal IP yet.
+(0.943844)Connection manager is now running. 
+Press CTRL + C to close this program at any time
+(0.953539)Attempting a connection to ('24.11.122.101', 5000)
+(0.953871)New socket(s) available to read.
+(0.953903)Notified socket manager of external changes made by thread<_MainThread(MainThread, started 4620)>.
+(0.953921)Peer ('24.11.122.101', 5000) already exists in the peer list.
+(0.953935)Peer at ('24.11.122.101', 5000) set to connecting.
+(15.731182)Attempted connection to  has timed out. Peer removed from list.
+(15.731556)New socket(s) available to read.
+(15.731587)Notified socket manager of external changes made by thread<_MainThread(MainThread, started 4620)>.
+(15.731604)Peer ('24.11.122.101', 5000) already exists in the peer list.
+(16.370821)IP Address of interface successfully set:10.0.0.2
+(16.37178)Internal IP has now been set to: 10.0.0.2
+(16.371916)Propagating IP address...
+(16.371999)Peer at ('24.11.122.101', 5000) was removed from the peer list.
