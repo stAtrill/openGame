@@ -15,25 +15,24 @@
 TODO/reference:
 -Use STUN to determine external IP: http://tools.ietf.org/html/rfc5389 , http://www.stunprotocol.org/
 -Use upnp to open ports, implement miniUPnP https://github.com/miniupnp/miniupnp/blob/master/miniupnpc/pymoduletest.py
--UDP tunnel: needs to use negotiated data port, not TCP negotiated port
 -Move routingTools init to after TunTap init, make routingTools upnp synchronous
 -Bug: Crash when announcing address to connecting peer if 2 peers trying to connect to each other simultaneously
--Bug: WMI does not actually set adapter metric, but returns 'operation completed' (Apparently windows 7 bug)
 -Reannounce to trackers - threaded
 -Implement NDIS 6 functionality
 -Opengame needs to request Admin privileges if it encounters privilege-related errors
 -Peer crash causes crash
--Check potentially un-threadsafe functions: peerConnection
+-Figure out how to propagate metric and tcp changes in registry
 ==============
-More diagnostics around line 351-352 (completion order, return value checking, timing etc)
--Check for race condition involving events in data listener thread
 -Datalistenerthread should not pass any data if there were errors
--Catch exceptions if port in use, check for alternate program instance running
 -Recent peers
+adapt routeAndSend to handle ipv6 traffic
 peerexchange
 miniupnp
 GUI
 '''
+
+#A note on structure: the peerlist isn't ever protected with locks, instead this program is designed
+#so that the peerlist is ever only accessed from the main thread
 
 import socket, string, random, select, time, struct, math, urllib.request, signal, binascii, os, win32ui, ctypes, sys
 
@@ -71,10 +70,10 @@ def Initialize():
 
     #Some settings
     settingsFormatString = "4sI?"   #4 chars (1 byte apiece), unsigned int (4 bytes), boolean (1 byte)
-    ethernetBufferSize = 16384
+    ethernetBufferSize = 8192
     logBufferSize = 65535           #This should probably be optimized later
     internalManagementIdentifier = "OpenGame"
-    connectingTimeout = 15          #Wait x seconds for a connection to complete
+    connectingTimeout =  10         #Wait x seconds for a connection to complete
     #connectionRetryCount = 0       #Never retry a connection, until the program properly handles timeouts
     verbosityLevel = 1              #Print any statements at or over this verbosity level
 
@@ -127,15 +126,13 @@ def Initialize():
     #Set the updates per second value
     updatesPerSecond = 100
     
-    #dest = ("open.demonii.com", 1337)
-    #backups
     #dest = ("tracker.coppersurfer.tk", 6969)
     dest = ("tracker.leechers-paradise.org", 6969)
     #dest = ("exodus.desync.com", 6969)
     #dest = ("9.rarbg.me", 2710)
     #dest = ("tracker.glotorrents.com", 6969)
     
-    trackerList = [("open.demonii.com", 1337), ("tracker.coppersurfer.tk", 6969), ("tracker.leechers-paradise.org", 6969), \
+    trackerList = [("tracker.coppersurfer.tk", 6969), ("tracker.leechers-paradise.org", 6969), \
             ("exodus.desync.com", 6969),  ("9.rarbg.me", 2710), ("tracker.glotorrents.com", 6969), ('tracker.blackunicorn.xyz', 6969)]
     
     
@@ -157,7 +154,14 @@ def Initialize():
     sigSockAddr = ("127.0.0.1", random.randint(49152, 65535))
     socketManagerThread = -1
     signalSocket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    signalSocket.bind(sigSockAddr)
+    while True:
+        try:
+            signalSocket.bind(sigSockAddr)
+        except socket.error:
+            sigSockAddr = ("127.0.0.1", random.randint(49152, 65535))
+        else:
+            break
+            
 
     #Append the main socket to the readable subset of the connection list
     connList[readable].append(signalSocket)
@@ -166,7 +170,13 @@ def Initialize():
     #Used for tracker announcing and UDP tunnel mode
     udpPort = 5000
     dataSocket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    dataSocket.bind(("", udpPort))
+    while True:
+        try:
+            dataSocket.bind(("", udpPort))
+        except socket.error:
+            udpPort += 1
+        else:
+            break
     
     #Append the data socket to the readable subset of the connection list if mode is UDP
     if settings[myTcpUdpMode] == UdpMode: connList[readable].append(dataSocket)
@@ -388,9 +398,9 @@ class tuntapWin:
                     local.dataLen = 28       #ARP on IPv4 are always 28 bytes long
                     mainTaskQueue.put([adapterReadCreator, bytes(local.readResult[1][14*self.trimEthnHeaders:14+local.dataLen])])
                     
-                elif bytes(local.readResult[1][12:14]) == b"\x86\xdd":
-                    local.dataLen = int.from_bytes(local.readResult[1][16:20], 'big')
-                    mainTaskQueue.put([adapterReadCreator, bytes(local.readResult[1][14*self.trimEthnHeaders:14+local.dataLen])])
+                # elif bytes(local.readResult[1][12:14]) == b"\x86\xdd":
+                    # local.dataLen = int.from_bytes(local.readResult[1][16:20], 'big')
+                    # mainTaskQueue.put([adapterReadCreator, bytes(local.readResult[1][14*self.trimEthnHeaders:14+local.dataLen])])
                 else:
                     log('Non-IP/ARP packet was discarded. EtherType code: ' + str(bytes(local.readResult[1][12:14])))
     
@@ -426,7 +436,7 @@ class tuntapWin:
 
     
     #This function updates the IP address and mask of the adapter, and additionally
-    #checks to make sure the interface metric is set to 1
+    #checks to make sure the interface metric is set to 20
     def setDeviceProperties(self, myIP, myMask):
         if not self.myMACaddr:
             log("Mac address not known, cannot set device yet", alwaysPrint)
@@ -442,9 +452,9 @@ class tuntapWin:
                     if c[0] == 0:
                         log("IP Address of interface successfully set:" + str(myIP), alwaysPrint)
                         
-                        #Update the connection metric if it isn't 1 and setting address was successful
-                        if interface.IPConnectionMetric != 1 or True:
-                            #oldMetric = interface.IPConnectionMetric
+                        #Update the connection metric if it isn't 20 and setting address was successful
+                        if interface.IPConnectionMetric != 20:
+                            oldMetric = interface.IPConnectionMetric
                             #e = interface.SetIPConnectionMetric(1)
                             
                             #The WMI interface will fail to set the metric, but will return successful.  Looking further, it seems to be a windows bug.
@@ -452,13 +462,13 @@ class tuntapWin:
                             self.ipKey = r"SYSTEM\CurrentControlSet\services\Tcpip\Parameters\Interfaces\ "[:-1]+self.myGUID
                             try:
                                 with reg.OpenKey(reg.HKEY_LOCAL_MACHINE, self.ipKey, access = reg.KEY_ALL_ACCESS) as tcpipInterface:
-                                    reg.SetValueEx(tcpipInterface, "InterfaceMetric", 0, reg.REG_DWORD, 1)
+                                    reg.SetValueEx(tcpipInterface, "InterfaceMetric", 0, reg.REG_DWORD, 20)
                                     reg.SetValueEx(tcpipInterface, "TCPNoDelay", 0, reg.REG_DWORD, 1)
                                     reg.SetValueEx(tcpipInterface, "TCPAckFrequency", 0, reg.REG_DWORD, 1)
                                 
                                     log("Interface metric was updated. Old metric was " + str(oldMetric) + ".", alwaysPrint)
-                            except:
-                                log("Failed while attempting to update interface metric.", alwaysPrint)
+                            except Exception as e:
+                                log("Failed while attempting to update interface metric: " + str(e), alwaysPrint)
                         return True
                     elif c[0] < 0: 
                         log("IP Address of interface was not successfully set: Administrator privileges are required to configure the interface.", alwaysPrint)
@@ -525,9 +535,6 @@ def shutdown(*args):
                 pass
         
     log('Shutdown complete. Exiting...', alwaysPrint)
-    
-    #We use os._exit() rather than sys.exit() because sys.exit() does not exit when built as exe
-    os._exit(0)
 
 #This function completely handles making connection to a tracker
 def trackerConnect(destAddress):
@@ -587,38 +594,47 @@ def Announce():
     dataSocket.sendto(payload, dest)
     log("Announced to tracker.", alwaysPrint)
 
-#A function to index returned addresses into the peerlist
+#A function to decode addresses returned from trackers into the peerlist
 #Used to initialize an empty peerlist
-def indexAddresses(rawAddr):
+def decodePeerAddresses(rawAddr):
+    #Peerlist structure by first indice is as follows:
+    #0: address of peer
+    #1: port of peer [TCP port, UDP port if known (defaults to None)]
+    #2: status of peer
+    #3: context sensitive storage of peer management data. Depends on status.
+    
+    local = threading.local()
+    
+    local.decodedAddresses = []
+    
+    #Sanity check
+    if len(rawAddr) % 6 != 0: log("Error while decoding addresses: raw address string is not devisible by 6.", alwaysPrint)
+    
     for i in range(0, len(rawAddr), 6):
-        #Older method of doing things
-        #a = ".".join([str(int.from_bytes([rawAddr[i]], 'big')), str(int.from_bytes([rawAddr[i+1]], 'big')), str(int.from_bytes([rawAddr[i+2]], 'big')), str(int.from_bytes([rawAddr[i+3]], 'big'))])
         a = socket.inet_ntoa(rawAddr[i:i+4])
-        p = int.from_bytes(recvData[24:26], 'big')
+        p = int.from_bytes(rawAddr[i+4:i+6], 'big')
         
         #Don't add an address to the list if it is ours
         if a != settings[myIP]:
-            peerList.append([a, p, notConnected, [0, None]])
-    
-    
-    #Diagnostics
-    log("Peerlist: \n"+str(peerList), alwaysPrint)
+            local.decodedAddresses.append((a, p))
+            
+            #peerList.append([a, [p, None], notConnected, [0, None]])
+    return local.decodedAddresses
 
 #A function to set the status of a peer in the list. Potentially unthreadsafe.
 #Will add an address into the peerlist if it doesn't already exist.
 def setPeerStatus(addr, status, peerSock = None):
-
     #Brief search to see if the peer is currently in our list, adding it if not
     pos = 0     #We initiate pos here to handle the case where the peerlist is empty
     for pos, (a, b, c, d) in enumerate(peerList):
-        if (a, b) == addr:
+        if (a, b[0]) == addr:
             log("Peer " + str(addr) + " already exists in the peer list.")
             break
     else:
         if status != removed:
             #Add peer into the peerlist, tracking both the address and socket
             if peerSock == None: log("WARNING: New peer added to list without an associated socket!")
-            peerList.append([addr[0], addr[1], status, [peerSock, None]])
+            peerList.append([addr[0], [addr[1], None], status, [peerSock, None]])
             log('Added to peerlist.')
             log(peerSock)
         else:
@@ -632,7 +648,7 @@ def setPeerStatus(addr, status, peerSock = None):
         
     else:
         if status == notConnected:
-            a = 30 #Setting a new timeout
+            a = [-1,] #Would normally be setting a new timeout
             
         elif status == connecting:
             #We store the peer's socket in the storage along with a placeholder for an internal IP address, and the time we began connecting
@@ -642,10 +658,11 @@ def setPeerStatus(addr, status, peerSock = None):
             a = peerList[pos][3]    #Preserves the existing storage
             
             #If we know our IP, tell them
-            routing.announceMyInternalIP(peerList[pos][3][0])
+            routing.announceMyInternalInfo(peerList[pos][3][0])
         
-            
+        #This may be incorrect    
         peerList[pos] = [peerList[pos][0], peerList[pos][1], status, a]
+        
     
     #Print diagnostic text
     if status == notConnected:
@@ -681,7 +698,7 @@ def peerConnection(incom, address = ""):
         #Add it to the writables list to tell when the connect finishes
         try:
             peerSock.connect(address)
-        except:
+        except OSError:
             pass
         modifyConnList(peerSock, writable, add)
         setPeerStatus(address, connecting, peerSock)
@@ -701,7 +718,7 @@ def modifyConnList(socket, subList, addRemove):
         signalSocket.sendto(b"a", sigSockAddr)
         log("Notified socket manager of external changes made by thread" + str(threading.current_thread()) + ".")
     else:
-        log('Socket manager has made changes.')
+        log('Socket manager has modified the connection list.')
 
 #These are placed all in one class for legibility, and to reduce function spam
 class routingTools:
@@ -744,17 +761,21 @@ class routingTools:
             return True
     
     #Function to add a newly discovered address from a peer
-    def addDiscoveredAddr(self, peerSock, intrnlAddr):
+    def addDiscoveredInfo(self, peerSockFileDisc, intrnlData):
+        decodedPort = int.from_bytes(intrnlData[1:3], 'big')
         #Yet another shallow copy of peerList, so we can modify peerList without messing up the loop
         for i, a in enumerate(peerList[:]):
-            if a[3][0] == peerSock:
+            if a[3][0].fileno() == peerSockFileDisc:
                 if peerList[i][3][1] != None:
                     log('The peers internal IP has already been set. Re-setting...')
-                peerList[i][3][1] = intrnlAddr
-                log('Peer at index: ' + str(i) + " now has internal IP address: " + self.prefix + str(intrnlAddr), alwaysPrint)
+                peerList[i][3][1] = intrnlData[0]
+                peerList[i][1][1] = decodedPort
+                log('Internal management info received. Peer at ' + str(a[3][0].getpeername()) + " has internal IP :" + self.prefix + str(intrnlData[0]) + " and UDP port:" + str(decodedPort), alwaysPrint)
                 self.updateMyAddr()
                 break
-                
+            else:
+                log("ERROR: peer not found when trying to update data!")
+
     #This function will update our internal address if there is enough information to do so
     def updateMyAddr(self):
         addr = 0
@@ -769,11 +790,12 @@ class routingTools:
             
             for a in peerList:
                 #If any peers have not yet reported their address to us, we cannot set our IP
-                if a[3][1] == None:
-                    log("Not able to set internal IP yet.")
-                    return False
-                else:
-                    self.addrInUse[a[3][1]] = True
+                if a[2] == connected or a[2] == connecting:
+                    if a[3][1] == None:
+                        log("Not able to set internal IP yet.")
+                        return False
+                    else:
+                        self.addrInUse[a[3][1]] = True
                 
             else:
                 #Set our address to the first un-used address
@@ -786,7 +808,7 @@ class routingTools:
                 log("Internal IP has now been set to: " + self.prefix + str(self.myAddr), alwaysPrint)
                 
                 #Propogate the address to all peers
-                self.announceMyInternalIP('_global')
+                self.announceMyInternalInfo('_global')
                 
                 return True
         else:
@@ -794,20 +816,21 @@ class routingTools:
             return True
     
     #This function will tell a peer our IP address, when we know it
-    def announceMyInternalIP(self, peerSock):
+    def announceMyInternalInfo(self, peerSock):
+        self.payload = bytes(chr(self.myAddr), "utf-8") + udpPort.to_bytes(2, "big")
         if peerSock != '_global':
             if self.isAddrSet:
-                log("Announced internal IP (" + self.prefix + str(self.myAddr) + ") to " + str(peerSock.getpeername()), alwaysPrint)
-                peerSock.sendall(bytes(internalManagementIdentifier + chr(self.myAddr), "utf-8"))
+                log("Announced internal management data (" + self.prefix + str(self.myAddr) + ") to " + str(peerSock.getpeername()), alwaysPrint)
+                peerSock.sendall(bytes(internalManagementIdentifier, "utf-8") + self.payload)
             else:
-                log("Announced tentative internal IP (" + self.prefix + str(self.myAddr) + ") to " + str(peerSock.getpeername()), alwaysPrint)
-                peerSock.sendall(bytes(internalManagementIdentifier + chr(self.myAddr), "utf-8"))
+                log("Announced tentative internal management data (" + self.prefix + str(self.myAddr) + ") to " + str(peerSock.getpeername()), alwaysPrint)
+                peerSock.sendall(bytes(internalManagementIdentifier, "utf-8") + self.payload)
         else:
             log("Propagating IP address...", alwaysPrint)
             for (a1, a2, status, storage) in peerList:
                 if status == connected:
-                    log("Announced internal IP (" + self.prefix + str(self.myAddr) + ") to " + str(storage[0].getpeername()), alwaysPrint)
-                    storage[0].sendall(bytes(internalManagementIdentifier + chr(self.myAddr), "utf-8"))
+                    log("Announced internal management data (" + self.prefix + str(self.myAddr) + ") to " + str(storage[0].getpeername()))
+                    storage[0].sendall(bytes(internalManagementIdentifier, "utf-8") + self.payload)
     
     def routeAndSend(self, dataToSend):
         #Calculate IPv4 address here to avoid repeated calculation inside the loop
@@ -819,7 +842,8 @@ class routingTools:
         else:
             isArp = False
         
-        for addr, port, status, extra in peerList:
+        #This may need to be locked, but we don't here for speed
+        for addr, port, status, extra in peerList[:]:
             if status == connected:
                 #Check first to see if the packet is a broadcast packet
                 #The position we read from changes depending on whether ethernet headers are stripped, so make sure
@@ -829,8 +853,12 @@ class routingTools:
                         extra[0].sendall(dataToSend)
                         log("Broadcast data sent to : " + str(extra[0].getpeername()))
                     else:
-                        dataSocket.sendto(dataToSend, (addr, udpPort))      #TODO: Fix using our udp port as peer port
-                        log("UDP broadcast data sent to: (" + str(addr) + ", " + str(port) + ")")
+                        if port[1]:
+                            dataSocket.sendto(dataToSend, (addr, port[1]))      #Send to their advertised port
+                            log("UDP broadcast data sent to: (" + str(addr) + ", " + str(port[1]) + ")")
+                        else:
+                            dataSocket.sendto(dataToSend, (addr, udpPort))      #Use our port if port unknown
+                            log("UDP broadcast data sent to: (" + str(addr) + ", " + str(udpPort) + ")")
                 else:
                     #Here we send data to a single peer
                     #Search the peerlist for the peer, then send
@@ -841,25 +869,34 @@ class routingTools:
                                     #log("Sent data only to : " + str(extra[0].getpeername()) + ", internal IP: " + str(routing.prefix + extra[1]))
                         else:
                             if socket.inet_aton(routing.prefix + str(extra[1])) == destAddress:
-                                dataSocket.sendto(dataToSend, (addr, udpPort))      #TODO: Fix using our udp port as peer port
-                                log("Sent UDP data only to : (" + str(addr) + ", " + str(udpPort) + "), internal IP: " + routing.prefix + str(extra[1]))
+                                if port[1]:
+                                    dataSocket.sendto(dataToSend, (addr, port[1]))      #Send to their advertised port
+                                    log("Sent UDP data only to : (" + str(addr) + ", " + str(port[1]) + "), internal IP: " + routing.prefix + str(extra[1]))
+                                else:
+                                    dataSocket.sendto(dataToSend, (addr, udpPort))      #Use our port if port unknown
+                                    log("Sent UDP data only to : (" + str(addr) + ", " + str(udpPort) + "[assumed, no port advertised]), internal IP: " + routing.prefix + str(extra[1]))
 
 #This thread waits on all sockets
 #The thread will automatically handle new connections, or connections closed by remote peer
 #All other data is read and placed on the mainTaskQueue
-def socketManager(mainTaskQueue):
+def socketManager(mainTaskQueue, pauseEvent):
     local = threading.local()
     local.s = None
     
     while True:
         #Block until some socket is ready
         local.rSock, local.wSock, local.e = select.select(connList[readable],connList[writable],[])
-         
+
+        #All of the below has been revised to place file descriptors on the queue, rather than the sockets itself
+        #This avoids a strange bug where 1% of the time, placing a socket on the queue will silently fail
         for local.s in local.rSock:
-            log('New socket(s) available to read.')
             #Handle new incoming connections
             if local.s == mainSocket:
-                peerConnection(incomingConnection)
+                #Since this is the only case in which the socket isn't actually handled from the socketManager, we
+                #Need to use an event to prevent the socketManager and runManager racing each other
+                mainTaskQueue.put([socketManagerCreator, [mainSocket.fileno(),]])
+                pauseEvent.clear()
+                pauseEvent.wait()
 
             #Handle broadcasts picked up via the loopback socket
             elif local.s == loopbackSocket:
@@ -871,24 +908,21 @@ def socketManager(mainTaskQueue):
             
             #Handle data from the data socket (but only when in UDP mode)
             elif local.s == dataSocket:
+                #log('New socket(s) available to read: dataSocket')
                 local.data = local.s.recvfrom(ethernetBufferSize)
-                mainTaskQueue.put([socketManagerCreator, [local.s, local.data]])    
+                mainTaskQueue.put([socketManagerCreator, [local.s.fileno(), local.data]])    
 
 
             else:
                 #Receive the data
                 #This is in a try block to catch force-closed connection exceptions
                 try:
-                    local.data = local.s.recvfrom(ethernetBufferSize)
-                #ConnectionResetError
-                except ConnectionResetError:
+                    local.data = local.s.recv(ethernetBufferSize)
+                    if not local.data: raise ConnectionAbortedError
+                except ConnectionError: #(ConnectionAbortedError, ConnectionRefusedError, ConnectionResetError):
                     #Connection forcefully closed
-                    log('Connection from ' + str(local.data[1]) + ' has forcefully closed. Probable cause: crash', alwaysPrint)
+                    log('Peer at  ' + str(local.s.getpeername()) + ' has disconnected.', alwaysPrint)
                     modifyConnList(local.s, readable, remove)
-                    
-                    #Diagnostics
-                    log("Peername: " + str(local.s.getpeername()) + ", address: " + str(local.data[1]))
-                    log(recvData)
                     
                     #Remove the disconnected peer
                     setPeerStatus(local.s.getpeername(), removed)
@@ -896,7 +930,7 @@ def socketManager(mainTaskQueue):
                     #Close the socket
                     local.s.close()
                 else:
-                    mainTaskQueue.put([socketManagerCreator, [local.s, local.data]])    
+                    mainTaskQueue.put([socketManagerCreator, [local.s.fileno(), local.data]])
                 
 
         for local.s in local.wSock:
@@ -909,18 +943,18 @@ def socketManager(mainTaskQueue):
             
 #The main manager loop
 def runManager():
-    #A variable to indicate when to stop
-    goOn = True
+    #Calculate the deltatime
     deltaTime = 1/updatesPerSecond
     
     #Start the socket manager as daemon
-    socketManagerThread = threading.Thread(target=socketManager, args=(mainTaskQueue,), daemon = True)
+    socketManagerPauseEvent = threading.event()
+    socketManagerThread = threading.Thread(target=socketManager, args=(mainTaskQueue, socketManagerPauseEvent), daemon = True)
     socketManagerThread.start()
 
     #Inform the user on program exit
     log('Connection manager is now running. \nPress CTRL + C to close this program at any time', alwaysPrint)
 
-    while goOn:
+    while True:
         #Block and wait for jobs
         try:
             taskCreator, taskInfo = mainTaskQueue.get(block=True, timeout=deltaTime)
@@ -929,36 +963,46 @@ def runManager():
         else:
             if taskCreator == socketManagerCreator:
                 #Handle tasks from the socket manager
-                for job in [taskInfo]:
-                    #Handle data from the data socket (but only when in UDP mode)
-                    if job[0] == dataSocket:
-                        if settings[myTcpUdpMode] == TcpMode:
-                            #Ignore it, since we are in the wrong mode
-                            continue
-                        else:
-                            #Diagnostics
-                            log('Incoming UDP data from ' + str(job[1][1]))
-                            #log("[DATAIN]"+str(job[1][0])+"[/DATA]")
-                            
-                            #Send packets to the TAP adapter write queue
-                            myTap.writeDataQueue.put(job[1][0])
 
+                #Handle data from the data socket (but only when in UDP mode)
+                if taskInfo[0] == mainSocket.fileno():
+                    #The socket manager will wait until this operation completes to prevent a race
+                    peerConnection(incomingConnection)
+                    socketManagerPauseEvent.set()
+                
+                elif taskInfo[0] == dataSocket.fileno():
+                    if settings[myTcpUdpMode] == TcpMode:
+                        #Ignore it, since we are in the wrong mode
+                        pass
                     else:
-                            #Diagnostics
-                            log('Incoming data from ' + str(job[1][1]))
-                            #log("[DATAIN]"+str(job[1][0])+"[/DATA]")
-                            
-                            if job[1][0][:len(internalManagementIdentifier)] == internalManagementIdentifier.encode():
-                                log('Internal management info received. Peer at ' + str(job[0].getpeername()) + " has internal IP :" + str(job[1][0][len(internalManagementIdentifier):]), alwaysPrint)
-                                routing.addDiscoveredAddr(job[0], ord(job[1][0][len(internalManagementIdentifier):].decode("utf-8")))
-                            else:
-                                #Send packets to the TAP adapter write queue
-                                myTap.writeDataQueue.put(job[1][0])
+                        #Diagnostics
+                        #log('Incoming UDP data from ' + str(taskInfo[1][1]))
+                        #log("[DATAIN]"+str(taskInfo[1][0])+"[/DATA]")
+                        
+                        #Send packets to the TAP adapter write queue
+                        myTap.writeDataQueue.put(taskInfo[1][0])
+
+                else:
+                    #Recreate the socket (note that, contrary to what the docs say, this DOES NOT return the same socket)
+                    sock = socket.socket(fileno=taskInfo[0])
+                    #Diagnostics
+                    log('Incoming TCP data from ' + str(sock.getpeername()))
+                    log(taskInfo)
+                    
+                    if taskInfo[1][:len(internalManagementIdentifier)] == internalManagementIdentifier.encode():
+                        #Send internal management info to be decoded
+                        routing.addDiscoveredInfo(taskInfo[0], taskInfo[1][len(internalManagementIdentifier):])
+                    else:
+                        #Send packets to the TAP adapter write queue
+                        #This behavior will be phased out in the future as TCP sockets are used exclusively for control data
+                        myTap.writeDataQueue.put(taskInfo[1])
             
             elif taskCreator == adapterReadCreator:
                 #Handle data from the adapter
                 routing.routeAndSend(taskInfo)
                 #log("[DATAOUT]"+str(taskInfo)+"[/DATA]")
+            else:
+                log("Error: taskCreator doesn't match any known creator")
     
         #Manage peer list
         #---------------------------------
@@ -971,32 +1015,29 @@ def runManager():
             #1 : Total time disconnected
 
             #Nothing of anything applies to our own IP, so skip
-            if a != settings[myIP]:
-                if connStatus == notConnected:
-                    t = connStorage[0] #The first stored variable is the timeout
+            if connStatus == notConnected:
+                t = connStorage[0] #The first stored variable is the timeout
+                
+                if t < 0:
+                    #Reconnect when timeout below zero
+                    peerConnection(outgoingConnection, (a, p[0]))
+
+                else:
+                    #Decrease the reconnect timer
+                    peerList[i] = [a, p, connStatus, [t-deltaTime]]
                     
-                    if t < 0:
-                        #Reconnect when timeout below zero
-                        peerConnection(outgoingConnection, (a, p))
-
-                    else:
-                        #Decrease the reconnect timer
-                        peerList[i] = [a, p, connStatus, [t-deltaTime]]
-                        
-                elif connStatus == connecting:
-                    if time.time() - connStorage[2] > connectingTimeout:
-                        #Connection timed out
-                        print(connStorage[0])
-                        log('Attempted connection to ' +str(connStorage[0].getpeername()) +  ' has timed out. Peer removed from list.', alwaysPrint)
-                        modifyConnList(connStorage[0], writable, remove)
-                        
-                        #Remove the disconnected peer
-                        setPeerStatus(connStorage[0].getpeername(), removed)
-                        
-                        #Close the socket
-                        connStorage[0].close()
+            elif connStatus == connecting:
+                if time.time() - connStorage[2] > connectingTimeout:
+                    #Connection timed out
+                    log('Attempted connection to ' +str(connStorage[0].getpeername()) +  ' has timed out. Peer removed from list.', alwaysPrint)
+                    modifyConnList(connStorage[0], writable, remove)
+                    
+                    #Remove the disconnected peer
+                    setPeerStatus(connStorage[0].getpeername(), removed)
+                    
+                    #Close the socket
+                    connStorage[0].close()
     
-
 
 #--Main program sequence--
 #-------------------------
@@ -1049,7 +1090,11 @@ log("Announce response: " + str(recvData))
 if len(recvData) > 19:
     #TODO: check action, etc, blahblah
     log("Reannounce interval: " + str(int.from_bytes(recvData[8:12], 'big')) + " seconds")
-    indexAddresses(recvData[20:])
+    for addr in decodePeerAddresses(recvData[20:]):
+        setPeerStatus(addr, notConnected)
+    
+    #Diagnostics
+    log("Peerlist: \n"+str(peerList), alwaysPrint)
 else:
     log("Announce response is too short", alwaysPrint)
 routing = routingTools()
@@ -1061,6 +1106,7 @@ try:
     runManager()
 #So that no traceback is printed for a CTRL+C
 except KeyboardInterrupt:
-    pass
-finally:
     shutdown()
+    os._exit()
+finally:
+   shutdown()

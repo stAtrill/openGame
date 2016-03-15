@@ -1,24 +1,118 @@
-(0.009537)Public IP restored from saved values: 71.70.198.47
-(0.009616)Old IP address is 9713 seconds old.
-(0.01044)Initialized. Verbosity level is set to 1
-(0.010837)Logging thread started.
-(0.012437)Tap GUID: {7E69327C-4CCA-4005-9096-AE4FF4A06FD3}
-(0.012984)MAC address updated: b'\x00\xff~i2|'
-(0.013703)Data listener thread started as daemon.
-(0.014957)Data injector thread started as daemon.
-(0.014986)Tuntap device initialized, interface created.
-(0.015046)b"\x00\x00\x04\x17'\x10\x19\x80\x00\x00\x00\x00\x00\x009\x8e"
-(0.170396)Response: b'\x00\x00\x00\x00\x00\x009\x8e\xfd\xdc\xcf~}A\xdb\x85'
-(0.17047)Connection ID: b'\xfd\xdc\xcf~}A\xdb\x85'
-(0.1716)Announced to tracker.
-(0.292232)Announce response: b'\x00\x00\x00\x01\x00\x00-\\\x00\x00\x06\xe7\x00\x00\x00\x01\x00\x00\x00\x00GF\xc6/\x13\x88'
-(0.292327)Reannounce interval: 1767 seconds
-(0.292378)Peerlist: 
-[]
-(0.292568)Routing tools initialized. My internal ip address initialized to :10.0.0.1
-(1.268216)IP Address of interface successfully set:10.0.0.2
-(1.271908)Failed while attempting to update interface metric.
-(1.272445)Internal IP has now been set to: 10.0.0.2
-(1.272492)Propagating IP address...
-(1.273379)Connection manager is now running. 
+(0.002509)Public IP restored from saved values: 71.70.198.47
+(0.002533)Old IP address is 11964 seconds old.
+(0.002772)Initialized. Verbosity level is set to 1
+(0.002883)Logging thread started.
+(0.003288)Tap GUID: {7E69327C-4CCA-4005-9096-AE4FF4A06FD3}
+(0.003416)MAC address updated: b'\x00\xff~i2|'
+(0.003625)Data listener thread started as daemon.
+(0.003815)Data injector thread started as daemon.
+(0.003822)Tuntap device initialized, interface created.
+(0.00384)b"\x00\x00\x04\x17'\x10\x19\x80\x00\x00\x00\x00\x00\x00=\xba"
+(0.154852)Response: b'\x00\x00\x00\x00\x00\x00=\xba\xfd\xdc\xcf~}A\xdb\x85'
+(0.154904)Connection ID: b'\xfd\xdc\xcf~}A\xdb\x85'
+(0.155396)Announced to tracker.
+(0.291951)Announce response: b'\x00\x00\x00\x01\x00\x00\xcbA\x00\x00\x07\xa1\x00\x00\x00\x02\x00\x00\x00\x00\x18\x0bze\x13\x88GF\xc6/\x13\x88'
+(0.291987)Reannounce interval: 1953 seconds
+(0.292331)WARNING: New peer added to list without an associated socket!
+(0.292342)Added to peerlist.
+(0.292346)None
+(0.292354)Peer at ('24.11.122.101', 5000) set to not connected.
+(0.292363)Peerlist: 
+[['24.11.122.101', [5000, None], 0, [-1]]]
+(0.292415)Routing tools initialized. My internal ip address initialized to :10.0.0.2
+(0.721333)IP Address of interface successfully set:10.0.0.2
+(0.722373)Interface metric was updated. Old metric was 20.
+(0.722503)Internal IP has now been set to: 10.0.0.2
+(0.722522)Propagating IP address...
+(0.722712)Connection manager is now running. 
 Press CTRL + C to close this program at any time
+(0.722739)taskCreator: 1 task info: [b'\xff\xff\xff\xff\xff\xff\x00\xff~i2|\x08\x06\x00\x01\x08\x00\x06\x04\x00\x01\x00\xff~i2|\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\n\x00\x00\x02']
+(0.72283)Attempting a connection to ('24.11.122.101', 5000)
+(0.723074)Notified socket manager of external changes made by thread<_MainThread(MainThread, started 6952)>.
+(0.723087)Peer ('24.11.122.101', 5000) already exists in the peer list.
+(0.723097)Peer at ('24.11.122.101', 5000) set to connecting.
+(1.26304)taskCreator: 1 task info: [b'\xff\xff\xff\xff\xff\xff\x00\xff~i2|\x08\x06\x00\x01\x08\x00\x06\x04\x00\x01\x00\xff~i2|\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\n\x00\x00\x02']
+(2.263167)taskCreator: 1 task info: [b'\xff\xff\xff\xff\xff\xff\x00\xff~i2|\x08\x06\x00\x01\x08\x00\x06\x04\x00\x01\x00\xff~i2|\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\n\x00\x00\x02']
+(3.263187)taskCreator: 1 task info: [b'\xff\xff\xff\xff\xff\xff\x00\xff~i2|\x08\x06\x00\x01\x08\x00\x06\x04\x00\x01\x00\xff~i2|\n\x00\x00\x02\x00\x00\x00\x00\x00\x00\n\x00\x00\x02']
+(3.282927)taskCreator: 1 task info: [b'\x01\x00^\x00\x00\x16\x00\xff~i2|\x08\x00F\x00\x00(\x04\xa3\x00\x00\x01\x026\x15\n\x00\x00\x02\xe0\x00\x00\x16\x94\x04\x00\x00"\x00\xea\x03\x00\x00\x00\x01\x04\x00\x00\x00\xef\xff\xff\xfa']
+(3.28375)taskCreator: 1 task info: [b'\x01\x00^\x7f\xff\xfa\x00\xff~i2|\x08\x00E\x00\x03\xfd\x04\xa4\x00\x00\x01\x11\xb7P\n\x00\x00\x02\xef\xff\xff\xfa\xc0\x00\x0ev\x03\xe9\x10\x97<?xml version="1.0" encoding="utf-8"?><soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing" xmlns:wsd="http://schemas.xmlsoap.org/ws/2005/04/discovery" xmlns:wsdp="http://schemas.xmlsoap.org/ws/2006/02/devprof" xmlns:pub="http://schemas.microsoft.com/windows/pub/2005/07"><soap:Header><wsa:To>urn:schemas-xmlsoap-org:ws:2005:04:discovery</wsa:To><wsa:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Hello</wsa:Action><wsa:MessageID>urn:uuid:9050205c-d3d0-4b76-bd49-16a9d17200f2</wsa:MessageID><wsd:AppSequence InstanceId="234" SequenceId="urn:uuid:c28e694b-0916-4aad-b093-0aacddc6c364" MessageNumber="118"></wsd:AppSequence></soap:Header><soap:Body><wsd:Hello><wsa:EndpointReference><wsa:Address>urn:uuid:d1d37c4a-165b-4965-ba07-8cb13f554693</wsa:Address></wsa:EndpointReference><wsd:Types>wsdp:Device pub:Computer</wsd:Types><wsd:MetadataVersion>82</wsd:MetadataVersion></wsd:Hello></soap:Body></soap:Envelope>']
+(3.297808)taskCreator: 1 task info: [b'\x01\x00^\x00\x00\x16\x00\xff~i2|\x08\x00F\x00\x00(\x04\xa5\x00\x00\x01\x026\x13\n\x00\x00\x02\xe0\x00\x00\x16\x94\x04\x00\x00"\x00\xf9\x01\x00\x00\x00\x01\x04\x00\x00\x00\xe0\x00\x00\xfc']
+(3.486258)taskCreator: 1 task info: [b'\x01\x00^\x7f\xff\xfa\x00\xff~i2|\x08\x00E\x00\x03\xfd\x04\xa6\x00\x00\x01\x11\xb7N\n\x00\x00\x02\xef\xff\xff\xfa\xc0\x00\x0ev\x03\xe9\x10\x97<?xml version="1.0" encoding="utf-8"?><soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing" xmlns:wsd="http://schemas.xmlsoap.org/ws/2005/04/discovery" xmlns:wsdp="http://schemas.xmlsoap.org/ws/2006/02/devprof" xmlns:pub="http://schemas.microsoft.com/windows/pub/2005/07"><soap:Header><wsa:To>urn:schemas-xmlsoap-org:ws:2005:04:discovery</wsa:To><wsa:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Hello</wsa:Action><wsa:MessageID>urn:uuid:9050205c-d3d0-4b76-bd49-16a9d17200f2</wsa:MessageID><wsd:AppSequence InstanceId="234" SequenceId="urn:uuid:c28e694b-0916-4aad-b093-0aacddc6c364" MessageNumber="118"></wsd:AppSequence></soap:Header><soap:Body><wsd:Hello><wsa:EndpointReference><wsa:Address>urn:uuid:d1d37c4a-165b-4965-ba07-8cb13f554693</wsa:Address></wsa:EndpointReference><wsd:Types>wsdp:Device pub:Computer</wsd:Types><wsd:MetadataVersion>82</wsd:MetadataVersion></wsd:Hello></soap:Body></soap:Envelope>']
+(3.763153)taskCreator: 1 task info: [b'\x01\x00^\x00\x00\x16\x00\xff~i2|\x08\x00F\x00\x000\x04\xa7\x00\x00\x01\x026\t\n\x00\x00\x02\xe0\x00\x00\x16\x94\x04\x00\x00"\x00\x05\x06\x00\x00\x00\x02\x04\x00\x00\x00\xef\xff\xff\xfa\x04\x00\x00\x00\xe0\x00\x00\xfc']
+(3.936184)taskCreator: 1 task info: [b'\x01\x00^\x7f\xff\xfa\x00\xff~i2|\x08\x00E\x00\x00\xa1\x04\xa8\x00\x00\x01\x11\xba\xa8\n\x00\x00\x02\xef\xff\xff\xfa\xecu\x07l\x00\x8dk\x0cM-SEARCH * HTTP/1.1\r\nHost:239.255.255.250:1900\r\nST:urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\nMan:"ssdp:discover"\r\nMX:3\r\n\r\n']
+(5.600495)taskCreator: 1 task info: [b'\x01\x00^\x00\x00\xfc\x00\xff~i2|\x08\x00E\x00\x002\x04\xa9\x00\x00\x01\x11\xca\x14\n\x00\x00\x02\xe0\x00\x00\xfc\xd7`\x14\xeb\x00\x1e?B\x10J\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x04wpad\x00\x00\x01\x00\x01']
+(5.600528)taskCreator: 1 task info: [b'\x01\x00^\x00\x00\xfc\x00\xff~i2|\x08\x00E\x00\x004\x04\xaa\x00\x00\x01\x11\xca\x11\n\x00\x00\x02\xe0\x00\x00\xfc\xf7\x1c\x14\xeb\x00 !\x8d\x88\xeb\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x06isatap\x00\x00\x01\x00\x01']
+(5.70032)taskCreator: 1 task info: [b'\x01\x00^\x00\x00\xfc\x00\xff~i2|\x08\x00E\x00\x002\x04\xab\x00\x00\x01\x11\xca\x12\n\x00\x00\x02\xe0\x00\x00\xfc\xd7`\x14\xeb\x00\x1e?B\x10J\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x04wpad\x00\x00\x01\x00\x01']
+(5.700368)taskCreator: 1 task info: [b'\x01\x00^\x00\x00\xfc\x00\xff~i2|\x08\x00E\x00\x004\x04\xac\x00\x00\x01\x11\xca\x0f\n\x00\x00\x02\xe0\x00\x00\xfc\xf7\x1c\x14\xeb\x00 !\x8d\x88\xeb\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x06isatap\x00\x00\x01\x00\x01']
+(5.900573)taskCreator: 1 task info: [b'\xff\xff\xff\xff\xff\xff\x00\xff~i2|\x08\x00E\x00\x00N\x04\xad\x00\x00\x80\x11 \xf2\n\x00\x00\x02\n\xff\xff\xff\x00\x89\x00\x89\x00:\xda\x84\xcdt\x01\x10\x00\x01\x00\x00\x00\x00\x00\x00 FHFAEBEECACACACACACACACACACACAAA\x00\x00 \x00\x01']
+(5.900761)taskCreator: 1 task info: [b'\xff\xff\xff\xff\xff\xff\x00\xff~i2|\x08\x00E\x00\x00N\x04\xae\x00\x00\x80\x11 \xf1\n\x00\x00\x02\n\xff\xff\xff\x00\x89\x00\x89\x00:\xd4\x80\xcds\x01\x10\x00\x01\x00\x00\x00\x00\x00\x00 EJFDEBFEEBFACACACACACACACACACAAA\x00\x00 \x00\x01']
+(6.557262)Attempted connection to ('24.11.122.101', 5000) has timed out. Peer removed from list.
+(6.557431)Notified socket manager of external changes made by thread<_MainThread(MainThread, started 6952)>.
+(6.557454)Peer ('24.11.122.101', 5000) already exists in the peer list.
+(6.557462)Address has already been set.
+(6.557468)Peer at ('24.11.122.101', 5000) was removed from the peer list.
+(6.65041)taskCreator: 1 task info: [b'\xff\xff\xff\xff\xff\xff\x00\xff~i2|\x08\x00E\x00\x00N\x04\xaf\x00\x00\x80\x11 \xf0\n\x00\x00\x02\n\xff\xff\xff\x00\x89\x00\x89\x00:\xda\x84\xcdt\x01\x10\x00\x01\x00\x00\x00\x00\x00\x00 FHFAEBEECACACACACACACACACACACAAA\x00\x00 \x00\x01']
+(6.650529)taskCreator: 1 task info: [b'\xff\xff\xff\xff\xff\xff\x00\xff~i2|\x08\x00E\x00\x00N\x04\xb0\x00\x00\x80\x11 \xef\n\x00\x00\x02\n\xff\xff\xff\x00\x89\x00\x89\x00:\xd4\x80\xcds\x01\x10\x00\x01\x00\x00\x00\x00\x00\x00 EJFDEBFEEBFACACACACACACACACACAAA\x00\x00 \x00\x01']
+(6.936444)taskCreator: 1 task info: [b'\x01\x00^\x7f\xff\xfa\x00\xff~i2|\x08\x00E\x00\x00\xa1\x04\xb1\x00\x00\x01\x11\xba\x9f\n\x00\x00\x02\xef\xff\xff\xfa\xecu\x07l\x00\x8dk\x0cM-SEARCH * HTTP/1.1\r\nHost:239.255.255.250:1900\r\nST:urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\nMan:"ssdp:discover"\r\nMX:3\r\n\r\n']
+(6.954374)taskCreator: 1 task info: [b'\x01\x00^\x7f\xff\xfa\x00\xff~i2|\x08\x00E\x00\x00\x9d\x04\xb2\x00\x00\x01\x11\xba\xa2\n\x00\x00\x02\xef\xff\xff\xfa\xecu\x07l\x00\x89h1M-SEARCH * HTTP/1.1\r\nHost:239.255.255.250:1900\r\nST:urn:schemas-wifialliance-org:device:WFADevice:1\r\nMan:"ssdp:discover"\r\nMX:3\r\n\r\n']
+(6.979377)taskCreator: 1 task info: [b'\x01\x00^\x7f\xff\xfa\x00\xff~i2|\x08\x00E\x00\x00\xa1\x04\xb3\x00\x00\x01\x11\xba\x9d\n\x00\x00\x02\xef\xff\xff\xfa\xecu\x07l\x00\x8dk\x0cM-SEARCH * HTTP/1.1\r\nHost:239.255.255.250:1900\r\nST:urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\nMan:"ssdp:discover"\r\nMX:3\r\n\r\n']
+(7.400362)taskCreator: 1 task info: [b'\xff\xff\xff\xff\xff\xff\x00\xff~i2|\x08\x00E\x00\x00N\x04\xb4\x00\x00\x80\x11 \xeb\n\x00\x00\x02\n\xff\xff\xff\x00\x89\x00\x89\x00:\xd4\x80\xcds\x01\x10\x00\x01\x00\x00\x00\x00\x00\x00 EJFDEBFEEBFACACACACACACACACACAAA\x00\x00 \x00\x01']
+(7.40058)taskCreator: 1 task info: [b'\xff\xff\xff\xff\xff\xff\x00\xff~i2|\x08\x00E\x00\x00N\x04\xb5\x00\x00\x80\x11 \xea\n\x00\x00\x02\n\xff\xff\xff\x00\x89\x00\x89\x00:\xda\x84\xcdt\x01\x10\x00\x01\x00\x00\x00\x00\x00\x00 FHFAEBEECACACACACACACACACACACAAA\x00\x00 \x00\x01']
+(7.941637)taskCreator: 1 task info: [b'\x01\x00^\x7f\xff\xfa\x00\xff~i2|\x08\x00E\x00\x00\xa1\x04\xb6\x00\x00\x01\x11\xba\x9a\n\x00\x00\x02\xef\xff\xff\xfa\xecu\x07l\x00\x8dk\x0cM-SEARCH * HTTP/1.1\r\nHost:239.255.255.250:1900\r\nST:urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\nMan:"ssdp:discover"\r\nMX:3\r\n\r\n']
+(8.150972)taskCreator: 1 task info: [b'\xff\xff\xff\xff\xff\xff\x00\xff~i2|\x08\x00E\x00\x00N\x04\xb7\x00\x00\x80\x11 \xe8\n\x00\x00\x02\n\xff\xff\xff\x00\x89\x00\x89\x00:\xd4x\xcd{\x01\x10\x00\x01\x00\x00\x00\x00\x00\x00 EJFDEBFEEBFACACACACACACACACACAAA\x00\x00 \x00\x01']
+(8.156997)taskCreator: 1 task info: [b'\x01\x00^\x7f\xff\xfa\x00\xff~i2|\x08\x00E\x00\x03\xfd\x04\xb8\x00\x00\x01\x11\xb7<\n\x00\x00\x02\xef\xff\xff\xfa\xc0\x00\x0ev\x03\xe9\x8f]<?xml version="1.0" encoding="utf-8"?><soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing" xmlns:wsd="http://schemas.xmlsoap.org/ws/2005/04/discovery" xmlns:wsdp="http://schemas.xmlsoap.org/ws/2006/02/devprof" xmlns:pub="http://schemas.microsoft.com/windows/pub/2005/07"><soap:Header><wsa:To>urn:schemas-xmlsoap-org:ws:2005:04:discovery</wsa:To><wsa:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Hello</wsa:Action><wsa:MessageID>urn:uuid:c99f4eb8-03c7-4b69-ab3f-26218ff9566d</wsa:MessageID><wsd:AppSequence InstanceId="234" SequenceId="urn:uuid:c28e694b-0916-4aad-b093-0aacddc6c364" MessageNumber="119"></wsd:AppSequence></soap:Header><soap:Body><wsd:Hello><wsa:EndpointReference><wsa:Address>urn:uuid:d1d37c4a-165b-4965-ba07-8cb13f554693</wsa:Address></wsa:EndpointReference><wsd:Types>wsdp:Device pub:Computer</wsd:Types><wsd:MetadataVersion>82</wsd:MetadataVersion></wsd:Hello></soap:Body></soap:Envelope>']
+(8.362555)taskCreator: 1 task info: [b'\x01\x00^\x7f\xff\xfa\x00\xff~i2|\x08\x00E\x00\x03\xfd\x04\xb9\x00\x00\x01\x11\xb7;\n\x00\x00\x02\xef\xff\xff\xfa\xc0\x00\x0ev\x03\xe9\x8f]<?xml version="1.0" encoding="utf-8"?><soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing" xmlns:wsd="http://schemas.xmlsoap.org/ws/2005/04/discovery" xmlns:wsdp="http://schemas.xmlsoap.org/ws/2006/02/devprof" xmlns:pub="http://schemas.microsoft.com/windows/pub/2005/07"><soap:Header><wsa:To>urn:schemas-xmlsoap-org:ws:2005:04:discovery</wsa:To><wsa:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Hello</wsa:Action><wsa:MessageID>urn:uuid:c99f4eb8-03c7-4b69-ab3f-26218ff9566d</wsa:MessageID><wsd:AppSequence InstanceId="234" SequenceId="urn:uuid:c28e694b-0916-4aad-b093-0aacddc6c364" MessageNumber="119"></wsd:AppSequence></soap:Header><soap:Body><wsd:Hello><wsa:EndpointReference><wsa:Address>urn:uuid:d1d37c4a-165b-4965-ba07-8cb13f554693</wsa:Address></wsa:EndpointReference><wsd:Types>wsdp:Device pub:Computer</wsd:Types><wsd:MetadataVersion>82</wsd:MetadataVersion></wsd:Hello></soap:Body></soap:Envelope>']
+(8.614496)taskCreator: 0 task info: [[720]]
+(8.614506)task is socketManager
+(8.614511)a
+(8.614619)Accepted a connection from ('24.11.122.101', 61145)
+(8.614632)Added to peerlist.
+(8.614636)<socket.socket fd=860, family=AddressFamily.AF_INET, type=SocketKind.SOCK_STREAM, proto=0, laddr=('192.168.1.22', 5000), raddr=('24.11.122.101', 61145)>
+(8.614658)Announced internal management data (10.0.0.2) to ('24.11.122.101', 61145)
+(8.614765)Peer at ('24.11.122.101', 61145) set to connected.
+(8.614989)Notified socket manager of external changes made by thread<Thread(Thread-4, started daemon 3652)>.
+(8.615172)New connection list: [[<socket.socket fd=720, family=AddressFamily.AF_INET, type=SocketKind.SOCK_STREAM, proto=0, laddr=('0.0.0.0', 5000)>, <socket.socket fd=736, family=AddressFamily.AF_INET, type=SocketKind.SOCK_DGRAM, proto=0, laddr=('127.0.0.1', 58819)>, <socket.socket fd=732, family=AddressFamily.AF_INET, type=SocketKind.SOCK_DGRAM, proto=0, laddr=('0.0.0.0', 5000)>, <socket.socket fd=860, family=AddressFamily.AF_INET, type=SocketKind.SOCK_STREAM, proto=0, laddr=('192.168.1.22', 5000), raddr=('24.11.122.101', 61145)>], []]
+(8.615226)TCP data:b'OpenGame\x02\x13\x88'
+(8.615232)[0, [860, b'OpenGame\x02\x13\x88']]
+(8.61524)Placing on queue completed.
+(8.615293)taskCreator: 0 task info: [[860, b'OpenGame\x02\x13\x88']]
+(8.615299)task is socketManager
+(8.615303)c
+(8.615317)Incoming TCP data from ('24.11.122.101', 61145)
+(8.615322)[860, b'OpenGame\x02\x13\x88']
+(8.615326)sent to decode
+(8.615334)860
+(8.615338)860
+(8.615343)success
+(8.615346)Address has already been set.
+(8.900422)taskCreator: 1 task info: [b'\xff\xff\xff\xff\xff\xff\x00\xff~i2|\x08\x00E\x00\x00N\x04\xba\x00\x00\x80\x11 \xe5\n\x00\x00\x02\n\xff\xff\xff\x00\x89\x00\x89\x00:\xd4x\xcd{\x01\x10\x00\x01\x00\x00\x00\x00\x00\x00 EJFDEBFEEBFACACACACACACACACACAAA\x00\x00 \x00\x01']
+(8.900558)UDP broadcast data sent to: (24.11.122.101, 5000)
+(8.923053)taskCreator: 0 task info: [[732, (b'\xff\xff\xff\xff\xff\xff\x00\xff17\x1c\xd3\x08\x06\x00\x01\x08\x00\x06\x04\x00\x01\x00\xff17\x1c\xd3\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xa9\xfe\x9cr', ('24.11.122.101', 5000))]]
+(8.923063)task is socketManager
+(8.923068)b
+(8.923094)taskCreator: 0 task info: [[732, (b'\xff\xff\xff\xff\xff\xff\x00\xff17\x1c\xd3\x08\x06\x00\x01\x08\x00\x06\x04\x00\x01\x00\xff17\x1c\xd3\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\n\x00\x00\x02', ('24.11.122.101', 5000))]]
+(8.923097)task is socketManager
+(8.923101)b
+(8.923478)taskCreator: 1 task info: [b'\x00\xff17\x1c\xd3\x00\xff~i2|\x08\x06\x00\x01\x08\x00\x06\x04\x00\x02\x00\xff~i2|\n\x00\x00\x02\x00\xff17\x1c\xd3\x00\x00\x00\x00']
+(8.923582)UDP broadcast data sent to: (24.11.122.101, 5000)
+(9.650415)taskCreator: 1 task info: [b'\xff\xff\xff\xff\xff\xff\x00\xff~i2|\x08\x00E\x00\x00N\x04\xbb\x00\x00\x80\x11 \xe4\n\x00\x00\x02\n\xff\xff\xff\x00\x89\x00\x89\x00:\xd4x\xcd{\x01\x10\x00\x01\x00\x00\x00\x00\x00\x00 EJFDEBFEEBFACACACACACACACACACAAA\x00\x00 \x00\x01']
+(9.650554)UDP broadcast data sent to: (24.11.122.101, 5000)
+(9.927608)taskCreator: 0 task info: [[732, (b'\xff\xff\xff\xff\xff\xff\x00\xff17\x1c\xd3\x08\x06\x00\x01\x08\x00\x06\x04\x00\x01\x00\xff17\x1c\xd3\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xa9\xfe\x9cr', ('24.11.122.101', 5000))]]
+(9.927617)task is socketManager
+(9.927646)b
+(9.979595)taskCreator: 1 task info: [b'\x01\x00^\x7f\xff\xfa\x00\xff~i2|\x08\x00E\x00\x00\x9d\x04\xbc\x00\x00\x01\x11\xba\x98\n\x00\x00\x02\xef\xff\xff\xfa\xecu\x07l\x00\x89h1M-SEARCH * HTTP/1.1\r\nHost:239.255.255.250:1900\r\nST:urn:schemas-wifialliance-org:device:WFADevice:1\r\nMan:"ssdp:discover"\r\nMX:3\r\n\r\n']
+(10.004496)taskCreator: 1 task info: [b'\x01\x00^\x7f\xff\xfa\x00\xff~i2|\x08\x00E\x00\x00\xa1\x04\xbd\x00\x00\x01\x11\xba\x93\n\x00\x00\x02\xef\xff\xff\xfa\xecu\x07l\x00\x8dk\x0cM-SEARCH * HTTP/1.1\r\nHost:239.255.255.250:1900\r\nST:urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\nMan:"ssdp:discover"\r\nMX:3\r\n\r\n']
+(10.400906)taskCreator: 1 task info: [b'\xff\xff\xff\xff\xff\xff\x00\xff~i2|\x08\x00E\x00\x00N\x04\xbe\x00\x00\x80\x11 \xe1\n\x00\x00\x02\n\xff\xff\xff\x00\x89\x00\x89\x00:\xd4t\xcd\x7f\x01\x10\x00\x01\x00\x00\x00\x00\x00\x00 EJFDEBFEEBFACACACACACACACACACAAA\x00\x00 \x00\x01']
+(10.401037)UDP broadcast data sent to: (24.11.122.101, 5000)
+(10.925033)taskCreator: 0 task info: [[732, (b'\xff\xff\xff\xff\xff\xff\x00\xff17\x1c\xd3\x08\x06\x00\x01\x08\x00\x06\x04\x00\x01\x00\xff17\x1c\xd3\xa9\xfe\x9cr\x00\x00\x00\x00\x00\x00\xa9\xfe\x9cr', ('24.11.122.101', 5000))]]
+(10.925042)task is socketManager
+(10.925048)b
+(10.94161)taskCreator: 1 task info: [b'\x01\x00^\x7f\xff\xfa\x00\xff~i2|\x08\x00E\x00\x00\xa1\x04\xbf\x00\x00\x01\x11\xba\x91\n\x00\x00\x02\xef\xff\xff\xfa\xecu\x07l\x00\x8dk\x0cM-SEARCH * HTTP/1.1\r\nHost:239.255.255.250:1900\r\nST:urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\nMan:"ssdp:discover"\r\nMX:3\r\n\r\n']
+(11.150439)taskCreator: 1 task info: [b'\xff\xff\xff\xff\xff\xff\x00\xff~i2|\x08\x00E\x00\x00N\x04\xc0\x00\x00\x80\x11 \xdf\n\x00\x00\x02\n\xff\xff\xff\x00\x89\x00\x89\x00:\xd4t\xcd\x7f\x01\x10\x00\x01\x00\x00\x00\x00\x00\x00 EJFDEBFEEBFACACACACACACACACACAAA\x00\x00 \x00\x01']
+(11.150573)UDP broadcast data sent to: (24.11.122.101, 5000)
+(11.900522)taskCreator: 1 task info: [b'\xff\xff\xff\xff\xff\xff\x00\xff~i2|\x08\x00E\x00\x00N\x04\xc1\x00\x00\x80\x11 \xde\n\x00\x00\x02\n\xff\xff\xff\x00\x89\x00\x89\x00:\xd4t\xcd\x7f\x01\x10\x00\x01\x00\x00\x00\x00\x00\x00 EJFDEBFEEBFACACACACACACACACACAAA\x00\x00 \x00\x01']
+(11.900664)UDP broadcast data sent to: (24.11.122.101, 5000)
+(13.941549)taskCreator: 1 task info: [b'\x01\x00^\x7f\xff\xfa\x00\xff~i2|\x08\x00E\x00\x00\xa1\x04\xc2\x00\x00\x01\x11\xba\x8e\n\x00\x00\x02\xef\xff\xff\xfa\xecu\x07l\x00\x8dk\x0cM-SEARCH * HTTP/1.1\r\nHost:239.255.255.250:1900\r\nST:urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\nMan:"ssdp:discover"\r\nMX:3\r\n\r\n']
+(16.946908)taskCreator: 1 task info: [b'\x01\x00^\x7f\xff\xfa\x00\xff~i2|\x08\x00E\x00\x00\xa1\x04\xc3\x00\x00\x01\x11\xba\x8d\n\x00\x00\x02\xef\xff\xff\xfa\xecu\x07l\x00\x8dk\x0cM-SEARCH * HTTP/1.1\r\nHost:239.255.255.250:1900\r\nST:urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\nMan:"ssdp:discover"\r\nMX:3\r\n\r\n']
+(19.946934)taskCreator: 1 task info: [b'\x01\x00^\x7f\xff\xfa\x00\xff~i2|\x08\x00E\x00\x00\xa1\x04\xc4\x00\x00\x01\x11\xba\x8c\n\x00\x00\x02\xef\xff\xff\xfa\xecu\x07l\x00\x8dk\x0cM-SEARCH * HTTP/1.1\r\nHost:239.255.255.250:1900\r\nST:urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\nMan:"ssdp:discover"\r\nMX:3\r\n\r\n']
+(22.946851)taskCreator: 1 task info: [b'\x01\x00^\x7f\xff\xfa\x00\xff~i2|\x08\x00E\x00\x00\xa1\x04\xc5\x00\x00\x01\x11\xba\x8b\n\x00\x00\x02\xef\xff\xff\xfa\xecu\x07l\x00\x8dk\x0cM-SEARCH * HTTP/1.1\r\nHost:239.255.255.250:1900\r\nST:urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\nMan:"ssdp:discover"\r\nMX:3\r\n\r\n']
