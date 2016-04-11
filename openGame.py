@@ -11,24 +11,26 @@
 #https://community.openvpn.net/openvpn/ticket/316
 #
 #Potentially useful resource: http://www.flounder.com/asynchexplorer.htm
+#Creating menus in system tray: http://www.brunningonline.net/simon/blog/archives/SysTrayIcon.py.html
+#Creating popups in system tray: http://stackoverflow.com/questions/15921203/how-to-create-a-system-tray-popup-message-with-python-windows
+#Web GUI: http://www.simple-is-better.org/template/pyratemp-latest/pyratemp.py
 '''
 TODO/reference:
--Use STUN to determine external IP: http://tools.ietf.org/html/rfc5389 , http://www.stunprotocol.org/
+-Use STUN to determine external IP: https://github.com/node/turn-client/blob/master/py-stun-client-demo.py , https://github.com/jtriley/pystun/blob/develop/stun/__init__.py
 -Use upnp to open ports, implement miniUPnP https://github.com/miniupnp/miniupnp/blob/master/miniupnpc/pymoduletest.py
--Move routingTools init to after TunTap init, make routingTools upnp synchronous
--Bug: Crash when announcing address to connecting peer if 2 peers trying to connect to each other simultaneously
--Reannounce to trackers - threaded
--Implement NDIS 6 functionality
+-Bug: Crash when announcing address to connecting peer if 2 peers trying to connect to each other simultaneously (announcing control info without connection completed?)
+-Support the NDIS 6 TAP adapter
 -Opengame needs to request Admin privileges if it encounters privilege-related errors
--Peer crash causes crash
--Figure out how to propagate metric and tcp changes in registry
+-Figure out how to propagate metric and tcp changes in registry (disable/enable the adapter)
+-hide main console by using pythonw.exe, once system tray configured
 ==============
--Datalistenerthread should not pass any data if there were errors
+STUN
 -Recent peers
 adapt routeAndSend to handle ipv6 traffic
 peerexchange
 miniupnp
 GUI
+Readme
 '''
 
 #A note on structure: the peerlist isn't ever protected with locks, instead this program is designed
@@ -47,15 +49,21 @@ import winreg as reg
 #These are for the routing manager class
 import wmi
 
+#These are shared between the program and the classes
 import queue, threading
-#import tkinter as tk
+
+#Peerlist structure by first indice is as follows:
+#0: address of peer
+#1: port of peer [TCP port, UDP port if known (defaults to None)]
+#2: status of peer
+#3: context sensitive storage of peer management data. Depends on status.
 
 #Functions:
 #----------
 
 #A function to initialize everything
 def Initialize():
-    global peerList, connList, connID, dest, udpPort, tcpPort, dataSocket, notConnected, connecting, connected, removed, add, remove,\
+    global peerList, connList, connID, udpPort, tcpPort, dataSocket, notConnected, connecting, connected, removed, createOnly, add, remove,\
     connListLock, incomingConnection, outgoingConnection, updatesPerSecond, mainSocket, signalSocket, sigSockAddr, socketManagerThread, readable, writable, \
     recvData, settings, settingsFormatString, myIP, myIPtimestamp, myTrackerData, useTUNTAPAutosetup, useBackupBroadcastDectection, \
     loopbackSocket, ethernetBufferSize, read, write, internalManagementIdentifier, myTcpUdpMode, UdpMode, TcpMode, connectingTimeout, mainTaskQueue, \
@@ -85,6 +93,7 @@ def Initialize():
     connecting = 1
     connected = 2
     removed = 3
+    createOnly = 4
     
     add = 0
     remove = 1
@@ -124,16 +133,7 @@ def Initialize():
     staleIPtimeout = 21600      #6 hours
 
     #Set the updates per second value
-    updatesPerSecond = 100
-    
-    #dest = ("tracker.coppersurfer.tk", 6969)
-    dest = ("tracker.leechers-paradise.org", 6969)
-    #dest = ("exodus.desync.com", 6969)
-    #dest = ("9.rarbg.me", 2710)
-    #dest = ("tracker.glotorrents.com", 6969)
-    
-    trackerList = [("tracker.coppersurfer.tk", 6969), ("tracker.leechers-paradise.org", 6969), \
-            ("exodus.desync.com", 6969),  ("9.rarbg.me", 2710), ("tracker.glotorrents.com", 6969), ('tracker.blackunicorn.xyz', 6969)]
+    updatesPerSecond = 10
     
     
     #Create TCP server socket
@@ -219,7 +219,7 @@ def Initialize():
             settings[myIPtimestamp] = math.floor(time.time())
         log('Public IP discovered from online service: ' + settings[myIP], alwaysPrint)
 
-#This class encapsulates the TUNTAP object (mainly so I can collapse it and not have to look at this cryptic eyesore)
+#This class encapsulates the TUNTAP object (mainly so I can collapse it and not have to look at it)
 #Even though there were some examples online, they only provided partial functionality, and were exceedingly cryptic
 #So this was written as an alternative
 class tuntapWin:
@@ -382,6 +382,7 @@ class tuntapWin:
                     #Diagnostics: if something messed up while waiting
                     if local.a != win32event.WAIT_OBJECT_0:
                         log("Data Listener Thread: Error while waiting on read completion signal: " + str(local.a), alwaysPrint)
+                        continue
                 else:
                     log("Read error, return code: " + str(local.readResult[0]) + ", error:" + str(win32api.GetLastError()), alwaysPrint)
                 
@@ -536,99 +537,259 @@ def shutdown(*args):
         
     log('Shutdown complete. Exiting...', alwaysPrint)
 
-#This function completely handles making connection to a tracker
-def trackerConnect(destAddress):
-    global connID   #This fixes a strange bug that creeped in somewhere. TODO: Investigate further.
-    transID = random.randrange(65535).to_bytes(4, 'big')
-    data = 0x41727101980.to_bytes(8, 'big') + 0x0.to_bytes(4, 'big') + transID
-
-    log(data, "Connecting to tracker " + str(destAddress[0]) + " on port " + str(destAddress[1]) + ".")
-    dataSocket.sendto(data, destAddress)
-
-    #Decode response
-    #------------------------
-    #TODO: make this select based, and give user option to wait or move on if response is slow
-    recvData, addr = dataSocket.recvfrom(ethernetBufferSize)
-
-    #Perform integrity checks and
-    #Return True if response checks out
-    if len(recvData) > 15:
-        if transID == recvData[4:8]:
-            if 0x0.to_bytes(4, 'big') == recvData[:4]:
-                #The response is valid
-                log("Response: " + str(recvData), "Connection to tracker completed.")   
-                connID = recvData[8:16]
-                log("Connection ID: " + str(connID))
-                return True
-            else:
-                log("Received action is incorrect in the tracker's response.", alwaysPrint)
-        else:
-            log("Received Transaction ID is incorrect in the tracker's response.", alwaysPrint)
-            log("Wanted: " + transID + " Received: " + recvData[4:8], alwaysPrint)
-    else:
-        log("Response too short", alwaysPrint)
-
-    #If we didn't return earlier, the response is bad
-    return False
-
-#A function to announce to trackers
-def Announce():
-    #Prepare payload
-    a = 0x1.to_bytes(4, 'big') #action
-    transID = random.randrange(65535).to_bytes(4, 'big') #TransID
-    iH = 'opnGameGroundControl'.encode('ascii')
-    myID = ('openGame'+''.join(random.choice(string.ascii_letters + string.digits) for _ in range(12))).encode('ascii')
-    d = 0x0.to_bytes(8, 'big')
-    l = 0x987.to_bytes(8, 'big')
-    u = 0x0.to_bytes(8, 'big')
-    e = 0x2.to_bytes(4, 'big') #Event = started
-    i = 0x0.to_bytes(4, 'big') #Use default: sender's IP
-    k = random.randrange(65535).to_bytes(4, 'big') #Randomized key. No idea why.
-    n = (-1).to_bytes(4, 'big', signed=True) #Max peers in response. Uses tracker defaults, will need to gain all somehow
-
-    payload = b"".join([connID + a + transID + iH + myID + d + l + u + e + i + k + n + tcpPort.to_bytes(2, 'big')])
-
-    #Diagnostics
-    #log(payload)
+#This class will manage all trackers
+class trackerManager:
+    #We use 2 data structures in here for management - one based on the hashes and this structure stores the transaction IDs
+    #We use an additional structure based on the trackers and this one stores the connection IDs.
+    def __init__(self):
+        #Settings/constants
+        self.trackerLookupTimeout = 2       #in seconds
+        self.protocolID = 0x41727101980.to_bytes(8, 'big')
     
-    dataSocket.sendto(payload, dest)
-    log("Announced to tracker.", alwaysPrint)
-
-#A function to decode addresses returned from trackers into the peerlist
-#Used to initialize an empty peerlist
-def decodePeerAddresses(rawAddr):
-    #Peerlist structure by first indice is as follows:
-    #0: address of peer
-    #1: port of peer [TCP port, UDP port if known (defaults to None)]
-    #2: status of peer
-    #3: context sensitive storage of peer management data. Depends on status.
-    
-    local = threading.local()
-    
-    local.decodedAddresses = []
-    
-    #Sanity check
-    if len(rawAddr) % 6 != 0: log("Error while decoding addresses: raw address string is not devisible by 6.", alwaysPrint)
-    
-    for i in range(0, len(rawAddr), 6):
-        a = socket.inet_ntoa(rawAddr[i:i+4])
-        p = int.from_bytes(rawAddr[i+4:i+6], 'big')
+        #Here we initialize our default trackers in a human readable format
+        initTrackers = []
+        initTrackers.append(("tracker.coppersurfer.tk", 6969))
+        initTrackers.append(("tracker.leechers-paradise.org", 6969))
+        initTrackers.append(("exodus.desync.com", 6969))
+        initTrackers.append(("9.rarbg.me", 2710))
+        initTrackers.append(("tracker.glotorrents.com", 6969))
+        initTrackers.append( ('tracker.blackunicorn.xyz', 6969))
         
-        #Don't add an address to the list if it is ours
-        if a != settings[myIP]:
-            local.decodedAddresses.append((a, p))
+        #Here we instantiate the list that will contain all data
+        self.data = []
+        
+        #Build our default tracker list with hosts
+        self.defaultTrackers = []
+        for t in initTrackers:
+            #Set the lookup timeouts
+            a = socket.getdefaulttimeout()
+            socket.setdefaulttimeout(self.trackerLookupTimeout)
+            try:
+                self.defaultTrackers.append((socket.gethostbyname(t[0]), t[1]))
+            except (socket.gaierror, socket.timeout):
+                pass
+            #Restore default timeouts
+            socket.setdefaulttimeout(a)
+       
+        #Finally, convert to list and back to remove duplicates
+        self.defaultTrackers = list(set(self.defaultTrackers[:]))
+        #This list helps determine if a response is from a tracker or not
+        self.trackerList = []
+        
+    #This function adds a new hash into the registry, or updates an existing one
+    def newInfoHash(self, infoHash, trackers = None):
+        if not trackers: trackers = self.defaultTrackers
             
-            #peerList.append([a, [p, None], notConnected, [0, None]])
-    return local.decodedAddresses
+        trackerInfo = []
+        
+        #Get the hosts of the trackers
+        a = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(self.trackerLookupTimeout)
+        for tracker in trackers:
+            try:
+                t= [(socket.gethostbyname(tracker[0]), tracker[1]), [0, 0]]
+            except (socket.gaierror, socket.timeout):
+                log("A tracker was not added to list because it could not be found during host lookup:" + str(tracker))
+            else:
+                trackerInfo.append(t)
+                
+                #Append the tracker, a randomized connection ID, and a connection flag to our tracker list if it doesn't exist
+                if not [a for a in self.trackerList if a[0] == t[0]]:
+                    self.trackerList.append([t[0], random.randrange(65535).to_bytes(4, 'big'), False])
+        socket.setdefaulttimeout(a)
+        
+        #Test if the hash is already being tracked
+        madeChanges = None
+        for i, element in enumerate(self.data[:]):
+            if infoHash == element[0]:
+                #Add any new trackers that are not already there
+                madeChanges = False
+                for tracker in trackerInfo:
+                    if not tracker in element[1]:
+                        self.data[i][1].append(tracker)
+                        madeChanges = True
+                break
+                        
+        else:
+            #Append the new hash, a randomized transaction ID, and trackers onto the database
+            self.data.append([infoHash, random.randrange(65535).to_bytes(4, 'big'), trackerInfo])
+            log("New hash added to registry.")
+        
+        if madeChanges is not None:
+            if madeChanges is True:
+                log("Existing hash in registry updated with new trackers.")
+            else:
+                log("No new information to add to existing hash.")
+                
+    #This function returns the time in seconds when the next announce is due
+    def getTimeToNextAnnounce(self):
+        t = None
+        for i in self.data:
+            for j in i[1]:
+                if t == None or t > j[1]:
+                    t = j[1]
+        return t
+        
+    #This function determines if an address is from one of our trackers
+    #This function doesn't actually return true/false, but empty sets or the actual tracker entry!
+    def isTrackerResponse(self, addr):
+        return [a for a in self.trackerList if a[0] == addr]
+    
+    #A function to decode address/port pairs returned from trackers
+    def decodePeerAddresses(self, rawAddr):        
+        decodedAddresses = []
+        
+        #Sanity check
+        if len(rawAddr) % 6 != 0: log("Error while decoding addresses: raw address string is not devisible by 6.", alwaysPrint)
+        
+        for i in range(0, len(rawAddr), 6):
+            a = socket.inet_ntoa(rawAddr[i:i+4])
+            p = int.from_bytes(rawAddr[i+4:i+6], 'big')
+            
+            #Don't add an address to the list if it is ours
+            if a != settings[myIP]:
+                decodedAddresses.append((a, p))
+                
+        return decodedAddresses
+    
+    #This function sends out the connect packet to a tracker
+    def connect(self, trackerEntry):
+        payload = self.protocolID + 0x0.to_bytes(4, 'big') + trackerEntry[1]
+        log("Connecting to tracker " + str(trackerEntry[0]) + ".")
+        dataSocket.sendto(payload, trackerEntry[0])
+    
+    #This function announces to the provided tracker
+    def announce(self, dataEntry, trackerEntry):
+       #Prepare payload
+       #The connection ID and transaction ID are stored in the tracker and data entry, respectively
+        a = 0x1.to_bytes(4, 'big') #action
+        myID = ('openGame'+''.join(random.choice(string.ascii_letters + string.digits) for _ in range(12))).encode('ascii')
+        d = 0x0.to_bytes(8, 'big')
+        l = 0x987.to_bytes(8, 'big')
+        u = 0x0.to_bytes(8, 'big')
+        e = 0x2.to_bytes(4, 'big') #Event = started
+        i = 0x0.to_bytes(4, 'big') #Use default: sender's IP
+        k = random.randrange(65535).to_bytes(4, 'big') #Randomized key. No idea why.
+        n = (-1).to_bytes(4, 'big', signed=True) #Max peers in response. Uses tracker defaults, will need to gain all somehow
+
+        payload = b"".join([trackerEntry[1] + a + dataEntry[1] + dataEntry[0] + myID + d + l + u + e + i + k + n + tcpPort.to_bytes(2, 'big')])
+
+        #Diagnostics
+        log("Announce payload: " + str(payload))
+        
+        dataSocket.sendto(payload, trackerEntry[0])
+        log("Announced to tracker : " + str(trackerEntry[0]))
+    
+    #This function processes tracker responses, returns true if valid, and false if not
+    def processTrackerResponse(self, respData, respAddr):
+        #Connection response
+        if 0x0.to_bytes(4, 'big') == respData[:4]:
+            if len(respData) > 15:
+                try:
+                    #This is intended to check the connection ID, but will break if the structure of the trackerList changes
+                    i = self.trackerList.index([respAddr, respData[4:8], True])
+                except ValueError:
+                    log("Error: Tracker at " + str(respAddr) + " sent an connection response, but the transaction ID in the response was not found in the tracker registry.", alwaysPrint)
+                else:
+                    #The response is valid
+                    log("Tracker response received: " + str(respData), "Connection to tracker at " + str(respAddr) + " completed.")
+                    
+                    #Extract and store this tracker's connection ID
+                    self.trackerList[i][1] = respData[8:16]
+                    log("Connection ID for tracker " + str(respAddr) + " : " + str(self.trackerList[i][1]))
+                    
+                    #Set the connection process identifier to 2, signaling connection completed
+                    self.trackerList[i][2] = 2
+                    return True
+            else:
+                log("Error: Tracker at " + str(respAddr) + " sent a connection response, but the length was invalid.", alwaysPrint)
+
+            #If we didn't return earlier, the response is bad
+            return False
+        
+        #Announce response
+        elif 0x1.to_bytes(4, 'big') == respData[:4]:
+            log("Announce response: " + str(respData))
+            
+            if len(respData) > 19:
+                for i, entry in enumerate(self.data):
+                    if entry[1] == respData[4:8]:
+                        
+                        #Store the reannounce interval
+                        for j, tracker in enumerate(self.data[i][2]):
+                            if tracker[0] == respAddr:
+                                self.data[i][2][j][1][1] = time.clock() + int.from_bytes(respData[8:12], 'big')
+                                
+                                #Set the tracker process identifier to -2, signalling the announce has been successfully received
+                                self.data[i][2][j][1][0] = -2
+                                log("Reannounce interval: " + str(int.from_bytes(respData[8:12], 'big')) + " seconds")
+                        
+                        #TODO: This currently connects to all peers, regardless of the hash they were found under
+                        #Will need fixing when switching hashes is implemented
+                        for addr in trackerManager.decodePeerAddresses(respData[20:]):
+                            setPeerStatus(addr, createOnly)
+                        
+                        #Diagnostics
+                        log("Peerlist: \n"+str(peerList), alwaysPrint)
+                        
+                        return True
+                else:
+                    log("Error: Tracker at " + str(respAddr) + " sent an announce response, but the transaction ID in the response was not found in the tracker registry.", alwaysPrint)
+            else:
+                log("Error: Tracker at " + str(respAddr) + " sent an announce response, but the length was invalid.", alwaysPrint)
+            
+            return False
+        
+        #Error response
+        elif 0x3.to_bytes(4, 'big') == respData[:4]:
+            if len(respData) >= 8:
+                for i in self.data:
+                    if i[1] == respData[4:8]:
+                        log("Error: Tracker at " + str(respAddr) + " encountered an error regarding hash " + str(i[0]) + " : " + respData[8:], alwaysPrint)
+                        #TODO: Do something. We currently do nothing if this occurs.
+                        return True
+                else:
+                    log("Error: Tracker at " + str(respAddr) + " sent an error response, but the transaction ID in the response was not found in the tracker registry.", alwaysPrint)
+            else:
+                log("Error: Tracker at " + str(respAddr) + " sent an error response, but the length was invalid.", alwaysPrint)
+            
+            return False
+        
+    #This function parses all trackers and connects/announces to the relevent ones
+    def updateTrackers(self):
+        #Connect to any trackers that have not been connected to
+        for i, tracker in enumerate(self.trackerList):
+            if tracker[2] == False:
+                #Connect to the tracker, and set the connection process identifier to 1
+                self.connect(tracker)
+                self.trackerList[i][2] = 1
+                
+         
+        #Announce if tracker connections are complete
+        #=============================
+        #Start by creating a list of all connected trackers (that have process identifiers set to 2)
+        connectedTrackers = [i[0] for i in self.trackerList if i[2] == 2]
+        
+        #Check all trackers by hash, and if connected, announce
+        for i, entry in enumerate(self.data):
+            for j, tracker in enumerate(entry[2]):
+                if tracker[0] in connectedTrackers and tracker[1][0] == 0:
+                    #Tracker is connected, announce
+                    self.announce(entry, [i for i in self.trackerList if i[0] == tracker[0]][0])
+                    
+                    #Set the tracker process identifier to -1, signalling the announce is in flight
+                    self.data[i][2][j][1][0] = -1
 
 #A function to set the status of a peer in the list. Potentially unthreadsafe.
 #Will add an address into the peerlist if it doesn't already exist.
 def setPeerStatus(addr, status, peerSock = None):
     #Brief search to see if the peer is currently in our list, adding it if not
-    pos = 0     #We initiate pos here to handle the case where the peerlist is empty
+    pos = 0                #We initiate pos here to handle the case where the peerlist is empty
+    exists = False      #This affects behavior in the createOnly mode
     for pos, (a, b, c, d) in enumerate(peerList):
         if (a, b[0]) == addr:
             log("Peer " + str(addr) + " already exists in the peer list.")
+            exists = True
             break
     else:
         if status != removed:
@@ -636,7 +797,6 @@ def setPeerStatus(addr, status, peerSock = None):
             if peerSock == None: log("WARNING: New peer added to list without an associated socket!")
             peerList.append([addr[0], [addr[1], None], status, [peerSock, None]])
             log('Added to peerlist.')
-            log(peerSock)
         else:
             log('The peer was not found in the peerlist to remove.')
 
@@ -647,20 +807,27 @@ def setPeerStatus(addr, status, peerSock = None):
         routing.updateMyAddr()      #Check addresses after a peer removal
         
     else:
-        if status == notConnected:
+        if status == notConnected or (status == createOnly and exists == False):
             a = [-1,] #Would normally be setting a new timeout
+            
+            #Correct the status if createOnly
+            status = notConnected
             
         elif status == connecting:
             #We store the peer's socket in the storage along with a placeholder for an internal IP address, and the time we began connecting
             a = [peerSock, None, math.floor(time.time())]
 
-        else:
+        elif status == connected or (status == createOnly and exists == True):
             a = peerList[pos][3]    #Preserves the existing storage
             
-            #If we know our IP, tell them
-            routing.announceMyInternalInfo(peerList[pos][3][0])
+            if status == connected:
+                #If we know our IP, tell them
+                routing.announceMyInternalInfo(peerList[pos][3][0])
+            else:
+                #Correct the status if createOnly
+                status = peerList[pos][2]
         
-        #This may be incorrect    
+        #Update the entry in the peerList   
         peerList[pos] = [peerList[pos][0], peerList[pos][1], status, a]
         
     
@@ -673,9 +840,11 @@ def setPeerStatus(addr, status, peerSock = None):
         log("Peer at " + str(addr) + " set to connected.")
     elif status == removed:
         log("Peer at " + str(addr) + " was removed from the peer list.")
+    elif status == createOnly:
+        log("Peer at " + str(addr) + " was created if it didn't exist in the peer list.")
 
 #A potentially pointless function to connect to peers
-#Incoming connections always called from socketManager thread, Outgoing always called from runManager Thread
+#This function is now always called from the runManager Thread
 def peerConnection(incom, address = ""):
     if incom:
         #Handle the new incoming connection
@@ -716,13 +885,13 @@ def modifyConnList(socket, subList, addRemove):
     #If the thread calling this function isn't the socket manager, we need to notify the socket manager
     if threading.current_thread() != socketManagerThread:
         signalSocket.sendto(b"a", sigSockAddr)
-        log("Notified socket manager of external changes made by thread" + str(threading.current_thread()) + ".")
+        log("Notified socket manager of external changes to connection list made by thread" + str(threading.current_thread()) + ".")
     else:
         log('Socket manager has modified the connection list.')
 
 #These are placed all in one class for legibility, and to reduce function spam
 class routingTools:
-    def __init__(self):
+    def __init__(self, enableSTUN):
         #Create the in-use IP list (maximum 254 addresses, 0 will always be reserved for the pretend 'gateway', and 255 broadcast)
         self.addrInUse = []
         for i in range(255):
@@ -746,7 +915,14 @@ class routingTools:
             else:
                 self.myMask += "0."
         else:
-            self.myMask = self.myMask[:-1]
+            self.myMask = self.myMask[:-1]      #Gets rid of the trailing period
+        
+        #Setup STUN functionality
+        if enableSTUN:
+            #TODO: this list should update from somewhere
+            self.STUNservers = ['stun.ekiga.net', 'stun.ideasip.com', 'stun.voiparound.com', 'stun.voipbuster.com', 'stun.voipstunt.com', 'stun.voxgratia.org']
+            
+            
         
         #Diagnostics
         log('Routing tools initialized. My internal ip address initialized to :' + self.prefix + str(self.myAddr), alwaysPrint)
@@ -761,16 +937,16 @@ class routingTools:
             return True
     
     #Function to add a newly discovered address from a peer
-    def addDiscoveredInfo(self, peerSockFileDisc, intrnlData):
+    def addDiscoveredInfo(self, peerSockFileDesc, intrnlData):
         decodedPort = int.from_bytes(intrnlData[1:3], 'big')
         #Yet another shallow copy of peerList, so we can modify peerList without messing up the loop
         for i, a in enumerate(peerList[:]):
-            if a[3][0].fileno() == peerSockFileDisc:
+            if a[3][0].fileno() == peerSockFileDesc:
                 if peerList[i][3][1] != None:
                     log('The peers internal IP has already been set. Re-setting...')
                 peerList[i][3][1] = intrnlData[0]
                 peerList[i][1][1] = decodedPort
-                log('Internal management info received. Peer at ' + str(a[3][0].getpeername()) + " has internal IP :" + self.prefix + str(intrnlData[0]) + " and UDP port:" + str(decodedPort), alwaysPrint)
+                log('Internal management info received. Peer at ' + str(a[3][0].getpeername()) + " has internal IP: " + self.prefix + str(intrnlData[0]) + " and UDP port:" + str(decodedPort), alwaysPrint)
                 self.updateMyAddr()
                 break
             else:
@@ -790,12 +966,16 @@ class routingTools:
             
             for a in peerList:
                 #If any peers have not yet reported their address to us, we cannot set our IP
+                #should additionally check for notConnected that are permenantly offline
                 if a[2] == connected or a[2] == connecting:
                     if a[3][1] == None:
                         log("Not able to set internal IP yet.")
                         return False
                     else:
                         self.addrInUse[a[3][1]] = True
+                elif a[2] == notConnected:
+                    log("Not able to set internal IP yet.")
+                    return False
                 
             else:
                 #Set our address to the first un-used address
@@ -812,7 +992,7 @@ class routingTools:
                 
                 return True
         else:
-            log('Address has already been set.')
+            log('Address has already been set.', alwaysPrint)
             return True
     
     #This function will tell a peer our IP address, when we know it
@@ -929,8 +1109,12 @@ def socketManager(mainTaskQueue, pauseEvent):
                     
                     #Close the socket
                     local.s.close()
+                except Exception as e:
+                    log(e, alwaysPrint)
+                    log(peerList)
+                    log(connList)
                 else:
-                    mainTaskQueue.put([socketManagerCreator, [local.s.fileno(), local.data]])
+                    mainTaskQueue.put([socketManagerCreator, [local.s.fileno(), local.data, local.s.getpeername()]])
                 
 
         for local.s in local.wSock:
@@ -940,14 +1124,13 @@ def socketManager(mainTaskQueue, pauseEvent):
             modifyConnList(local.s, writable, remove)
             setPeerStatus(local.s.getpeername(), connected)
 
-            
 #The main manager loop
 def runManager():
     #Calculate the deltatime
     deltaTime = 1/updatesPerSecond
     
     #Start the socket manager as daemon
-    socketManagerPauseEvent = threading.event()
+    socketManagerPauseEvent = threading.Event()
     socketManagerThread = threading.Thread(target=socketManager, args=(mainTaskQueue, socketManagerPauseEvent), daemon = True)
     socketManagerThread.start()
 
@@ -979,14 +1162,16 @@ def runManager():
                         #log('Incoming UDP data from ' + str(taskInfo[1][1]))
                         #log("[DATAIN]"+str(taskInfo[1][0])+"[/DATA]")
                         
-                        #Send packets to the TAP adapter write queue
-                        myTap.writeDataQueue.put(taskInfo[1][0])
+                        if trackerManager.isTrackerResponse(taskInfo[1][1]):
+                            #Send packets to the tracker manager
+                            trackerManager.processTrackerResponse(taskInfo[1][0], taskInfo[1][1])
+                        else:
+                            #Send packets to the TAP adapter write queue
+                            myTap.writeDataQueue.put(taskInfo[1][0])
 
                 else:
-                    #Recreate the socket (note that, contrary to what the docs say, this DOES NOT return the same socket)
-                    sock = socket.socket(fileno=taskInfo[0])
                     #Diagnostics
-                    log('Incoming TCP data from ' + str(sock.getpeername()))
+                    log('Incoming TCP data from ' + str(taskInfo[2]))
                     log(taskInfo)
                     
                     if taskInfo[1][:len(internalManagementIdentifier)] == internalManagementIdentifier.encode():
@@ -1037,6 +1222,9 @@ def runManager():
                     
                     #Close the socket
                     connStorage[0].close()
+        
+        #Update all trackers
+        trackerManager.updateTrackers()
     
 
 #--Main program sequence--
@@ -1073,31 +1261,11 @@ win32api.SetConsoleCtrlHandler(shutdown, True)
 myTap = tuntapWin(useTUNTAPAutosetup)
 log("Tuntap device initialized, interface created.", alwaysPrint)
 
+#Instantiate our tracker manager class
+trackerManager = trackerManager()
+trackerManager.newInfoHash('opnGameGroundControl'.encode('ascii'))
 
-#Connect to our tracker of choice, and announce if it succeeds
-if trackerConnect(dest):
-    #Store connection ID and announce
-    Announce()
-else:
-    log('Connection to tracker failed. Autoclosing in 5 seconds', alwaysPrint)
-    time.sleep(5)
-    sys.exit()
-
-#Decode announce response
-#------------------------
-recvData, addr = dataSocket.recvfrom(ethernetBufferSize)
-log("Announce response: " + str(recvData))
-if len(recvData) > 19:
-    #TODO: check action, etc, blahblah
-    log("Reannounce interval: " + str(int.from_bytes(recvData[8:12], 'big')) + " seconds")
-    for addr in decodePeerAddresses(recvData[20:]):
-        setPeerStatus(addr, notConnected)
-    
-    #Diagnostics
-    log("Peerlist: \n"+str(peerList), alwaysPrint)
-else:
-    log("Announce response is too short", alwaysPrint)
-routing = routingTools()
+routing = routingTools(False)
 
 #Enter the main management loop
 #------------------------------
@@ -1107,6 +1275,7 @@ try:
 #So that no traceback is printed for a CTRL+C
 except KeyboardInterrupt:
     shutdown()
-    os._exit()
+    time.sleep(1)
+    os._exit(0)
 finally:
    shutdown()
